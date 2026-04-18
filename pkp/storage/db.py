@@ -73,6 +73,17 @@ class Job:
 
 
 @dataclass
+class SearchResult:
+    """Search result at document level."""
+
+    doc_sha256: str
+    title: str
+    url: str | None
+    match_count: int
+    best_rank: float
+
+
+@dataclass
 class IngestionMetric:
     """Timing metrics for an ingestion."""
 
@@ -112,10 +123,11 @@ CREATE TABLE IF NOT EXISTS chunks (
     FOREIGN KEY (doc_sha256) REFERENCES documents(sha256)
 );
 
--- BM25 full-text index over chunk content
+-- BM25 full-text index over chunk content and title (title weighted 10x)
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     chunk_id UNINDEXED,
     doc_sha256 UNINDEXED,
+    title,
     content,
     tokenize = 'porter unicode61'
 );
@@ -367,9 +379,16 @@ class Database:
                 chunk.token_count,
             ),
         )
+
+        doc_row = await self._fetch_one(
+            "SELECT title FROM documents WHERE sha256 = ?",
+            (chunk.doc_sha256,),
+        )
+        title = doc_row["title"] if doc_row else ""
+
         await self._exec(
-            "INSERT INTO chunks_fts (chunk_id, doc_sha256, content) VALUES (?, ?, ?)",
-            (chunk.chunk_id, chunk.doc_sha256, fts_content),
+            "INSERT INTO chunks_fts (chunk_id, doc_sha256, title, content) VALUES (?, ?, ?, ?)",
+            (chunk.chunk_id, chunk.doc_sha256, title, fts_content),
         )
         assert self._conn is not None
         await self._conn.commit()
@@ -384,6 +403,41 @@ class Database:
             (query, limit),
         )
         return [(row["chunk_id"], row["rank"]) for row in rows]
+
+    async def search_documents(self, query: str, limit: int = 10) -> list[SearchResult]:
+        """Search documents using FTS5 with title weighting (10x), single SQL query."""
+        rows = await self._fetch_all(
+            """WITH fts_results AS (
+                SELECT doc_sha256, bm25(chunks_fts, 10.0, 1.0) as rank
+                FROM chunks_fts
+                WHERE chunks_fts MATCH ?
+                ORDER BY rank
+                LIMIT 100
+            )
+            SELECT
+                d.sha256,
+                d.title,
+                d.url,
+                COUNT(*) as match_count,
+                MIN(r.rank) as best_rank
+            FROM fts_results r
+            JOIN documents d ON d.sha256 = r.doc_sha256
+            GROUP BY d.sha256
+            ORDER BY best_rank
+            LIMIT ?""",
+            (query, limit),
+        )
+
+        return [
+            SearchResult(
+                doc_sha256=row["sha256"],
+                title=row["title"],
+                url=row["url"],
+                match_count=row["match_count"],
+                best_rank=row["best_rank"],
+            )
+            for row in rows
+        ]
 
     async def get_all_documents(self) -> list[Document]:
         """Get all documents."""
