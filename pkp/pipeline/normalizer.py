@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -37,6 +38,7 @@ class ChunkedDocument:
     word_count: int
     token_count: int
     retrieved_at: datetime
+    normalization_time_ms: int = 0
 
 
 class NormalizerService:
@@ -67,6 +69,7 @@ class NormalizerService:
         metadata: dict[str, Any] | None = None,
     ) -> ChunkedDocument:
         """Normalize extracted text and create chunks."""
+        start_time = time.perf_counter()
         now = datetime.utcnow()
 
         cleaned_text = self._clean_markdown(extracted_text)
@@ -90,6 +93,8 @@ class NormalizerService:
             frontmatter=frontmatter,
         )
 
+        normalization_time_ms = int((time.perf_counter() - start_time) * 1000)
+
         return ChunkedDocument(
             sha256=sha256,
             title=title,
@@ -101,6 +106,7 @@ class NormalizerService:
             word_count=word_count,
             token_count=token_count,
             retrieved_at=now,
+            normalization_time_ms=normalization_time_ms,
         )
 
     def _clean_markdown(self, text: str) -> str:
