@@ -5,97 +5,21 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
 from pkp.config import get_config
-
-
-@dataclass
-class Document:
-    """Document record from the documents table."""
-
-    sha256: str
-    title: str
-    doc_type: str
-    archive_path: str
-    retrieved_at: datetime
-    url: str | None = None
-    indexed_at: datetime | None = None
-    word_count: int | None = None
-    vault_path: str | None = None
-    tags: list[str] = field(default_factory=list)
-
-
-@dataclass
-class Chunk:
-    """Chunk record from the chunks table."""
-
-    chunk_id: str
-    doc_sha256: str
-    chunk_index: int
-    char_start: int
-    char_end: int
-    token_count: int | None = None
-
-
-@dataclass
-class Proposal:
-    """Proposal record from the proposals table."""
-
-    proposal_id: str
-    doc_a_sha256: str
-    doc_b_sha256: str
-    score: float
-    rationale: str | None
-    status: str
-    created_at: datetime
-    reviewed_at: datetime | None = None
-    link_type: str | None = None
-
-
-@dataclass
-class Job:
-    """Job record from the jobs table."""
-
-    job_id: str
-    job_type: str
-    payload: str
-    status: str
-    created_at: datetime
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
-    error: str | None = None
-
-
-@dataclass
-class SearchResult:
-    """Search result at document level."""
-
-    doc_sha256: str
-    title: str
-    url: str | None
-    match_count: int
-    best_rank: float
-
-
-@dataclass
-class IngestionMetric:
-    """Timing metrics for an ingestion."""
-
-    doc_sha256: str = ""
-    doc_type: str = ""
-    source: str | None = None
-    total_time_ms: int = 0
-    extraction_time_ms: int | None = None
-    normalization_time_ms: int | None = None
-    archive_time_ms: int | None = None
-    created_at: datetime | None = None
-
+from pkp.storage.models import (
+    Chunk,
+    Document,
+    IngestionMetric,
+    Job,
+    Proposal,
+    SearchResult,
+)
 
 SCHEMA = """
 -- Core document registry
@@ -312,7 +236,7 @@ class Database:
 
     async def claim_job(self, job_id: str) -> Job | None:
         """Claim a pending job for processing."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._exec(
             "UPDATE jobs SET status = 'running', started_at = ? WHERE job_id = ? AND status = 'pending'",
             (now, job_id),
@@ -326,7 +250,7 @@ class Database:
 
     async def complete_job(self, job_id: str, error: str | None = None) -> None:
         """Mark a job as completed."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(UTC).isoformat()
         status = "failed" if error else "done"
         await self._exec(
             "UPDATE jobs SET status = ?, completed_at = ?, error = ? WHERE job_id = ?",
@@ -339,7 +263,7 @@ class Database:
         self, job_id: str, job_type: str, payload: dict[str, Any]
     ) -> None:
         """Create a new job."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._exec(
             "INSERT INTO jobs (job_id, job_type, payload, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
             (job_id, job_type, json.dumps(payload), now),
@@ -446,6 +370,11 @@ class Database:
         )
         return [self._row_to_document(row) for row in rows]
 
+    async def get_distinct_doc_types(self) -> list[str]:
+        """Get distinct doc_types."""
+        rows = await self._fetch_all("SELECT DISTINCT doc_type FROM documents")
+        return [row["doc_type"] for row in rows]
+
     async def insert_proposal(self, proposal: Proposal) -> None:
         """Insert a new proposal."""
         await self._exec(
@@ -506,7 +435,7 @@ class Database:
 
     async def mark_document_indexed(self, sha256: str) -> None:
         """Mark a document as indexed."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._exec(
             "UPDATE documents SET indexed_at = ? WHERE sha256 = ?",
             (now, sha256),
@@ -525,7 +454,7 @@ class Database:
 
     async def insert_metric(self, metric: IngestionMetric) -> None:
         """Insert ingestion timing metric."""
-        created_at = metric.created_at or datetime.utcnow()
+        created_at = metric.created_at or datetime.now(UTC)
         await self._exec(
             """INSERT INTO ingestion_metrics
             (doc_sha256, doc_type, source, total_time_ms, extraction_time_ms, normalization_time_ms, archive_time_ms, created_at)
