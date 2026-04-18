@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ class ExtractedDocument:
     metadata: dict[str, Any] = field(default_factory=dict)
     doc_type: str = "article"
     archive_path: Path | None = None
+    extraction_time_ms: int = 0
 
 
 class ExtractionError(Exception):
@@ -57,21 +59,31 @@ class ParserError(ExtractionError):
 class TrafilaturaExtractor:
     """Extract content from URLs using Trafilatura."""
 
-    def __init__(self, timeout: float = 30.0) -> None:
-        """Initialize with timeout."""
+    def __init__(self, timeout: float = 30.0, user_agent: str | None = None) -> None:
+        """Initialize with timeout and user agent."""
         self.timeout = timeout
+        self.user_agent = (
+            user_agent or "PKP/0.1.0 (https://github.com/KiranRajeev-KV/pkp)"
+        )
 
     async def extract(self, url: str) -> ExtractedDocument:
         """Extract content from a URL."""
+        start_time = time.perf_counter()
         try:
             async with httpx.AsyncClient(
-                timeout=self.timeout, follow_redirects=True
+                timeout=self.timeout,
+                follow_redirects=True,
+                headers={"User-Agent": self.user_agent},
             ) as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 html = response.text
+        except httpx.HTTPStatusError as e:
+            raise NetworkError(
+                f"Failed to fetch URL {url}: HTTP {e.response.status_code} - {e}"
+            ) from e
         except httpx.HTTPError as e:
-            raise NetworkError(f"Failed to fetch URL: {e}") from e
+            raise NetworkError(f"Failed to fetch URL {url}: {e}") from e
 
         result = trafilatura.extract(
             html,
@@ -105,6 +117,8 @@ class TrafilaturaExtractor:
 
         title = metadata.get("title") or self._extract_title_from_markdown(result)
 
+        extraction_time_ms = int((time.perf_counter() - start_time) * 1000)
+
         return ExtractedDocument(
             sha256=docsha256,
             url=url,
@@ -112,6 +126,7 @@ class TrafilaturaExtractor:
             text=result,
             metadata=metadata,
             doc_type="article",
+            extraction_time_ms=extraction_time_ms,
         )
 
     def _extract_title_from_markdown(self, text: str) -> str:
@@ -133,6 +148,8 @@ class DoclingExtractor:
 
     async def extract(self, pdf_path: Path) -> ExtractedDocument:
         """Extract content from a PDF file."""
+        start_time = time.perf_counter()
+
         if not pdf_path.exists():
             raise ParserError(f"PDF file not found: {pdf_path}")
 
@@ -146,6 +163,8 @@ class DoclingExtractor:
             markdown = doc.export_to_markdown()
         except Exception as e:
             raise ParserError(f"Failed to export PDF to Markdown: {e}") from e
+
+        extraction_time_ms = int((time.perf_counter() - start_time) * 1000)
 
         if not markdown or len(markdown.strip()) < 100:
             raise ParserError(
@@ -169,6 +188,7 @@ class DoclingExtractor:
             text=markdown,
             metadata=metadata,
             doc_type="pdf",
+            extraction_time_ms=extraction_time_ms,
         )
 
     def _extract_title(self, doc: Any, pdf_path: Path, markdown: str) -> str:
@@ -190,9 +210,14 @@ class DoclingExtractor:
 class ExtractorService:
     """Unified extraction service for URLs and PDFs."""
 
-    def __init__(self) -> None:
+    def __init__(self, user_agent: str | None = None) -> None:
         """Initialize the extractor service."""
-        self.url_extractor = TrafilaturaExtractor()
+        if user_agent is None:
+            from pkp import __version__
+
+            user_agent = f"PKP/{__version__} (https://github.com/KiranRajeev-KV/pkp)"
+
+        self.url_extractor = TrafilaturaExtractor(user_agent=user_agent)
         self.pdf_extractor = DoclingExtractor()
 
     async def extract(self, request: SourceRequest) -> ExtractedDocument:
