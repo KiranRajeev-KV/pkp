@@ -29,9 +29,11 @@ class PKPConfig:
 
     user_agent: str = "PKP/0.1.0 (https://github.com/KiranRajeev-KV/pkp)"
 
-    embedding_model: str = "nomic-embed-text"
+    embedding_model: str = "BAAI/bge-m3"
     embedding_endpoint: str = "http://localhost:11434"
-    embedding_dimension: int = 768
+    embedding_dimension: int = 1024
+    embed_batch_size: int = 32
+    qdrant_url: str = "http://localhost:6333"
 
     llm_provider: str = "ollama"
     llm_model: str = "mistral-nemo"
@@ -77,6 +79,8 @@ class PKPConfig:
             "embedding_model": self.embedding_model,
             "embedding_endpoint": self.embedding_endpoint,
             "embedding_dimension": self.embedding_dimension,
+            "embed_batch_size": self.embed_batch_size,
+            "qdrant_url": self.qdrant_url,
             "llm_provider": self.llm_provider,
             "llm_model": self.llm_model,
             "chunk_size_tokens": self.chunk_size_tokens,
@@ -99,9 +103,11 @@ class PKPConfig:
             user_agent=data.get(
                 "user_agent", "PKP/0.1.0 (https://github.com/KiranRajeev-KV/pkp)"
             ),
-            embedding_model=data.get("embedding_model", "nomic-embed-text"),
+            embedding_model=data.get("embedding_model", "BAAI/bge-m3"),
             embedding_endpoint=data.get("embedding_endpoint", "http://localhost:11434"),
-            embedding_dimension=data.get("embedding_dimension", 768),
+            embedding_dimension=data.get("embedding_dimension", 1024),
+            embed_batch_size=data.get("embed_batch_size", 32),
+            qdrant_url=data.get("qdrant_url", "http://localhost:6333"),
             llm_provider=data.get("llm_provider", "ollama"),
             llm_model=data.get("llm_model", "mistral-nemo"),
             chunk_size_tokens=data.get("chunk_size_tokens", 512),
