@@ -5,10 +5,23 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
-import tiktoken
+from transformers import AutoTokenizer
+
+from pkp.config import get_config
+
+_tokenizer: AutoTokenizer | None = None
+
+
+def get_tokenizer() -> AutoTokenizer:
+    """Get the global XLMRobertaTokenizer instance."""
+    global _tokenizer
+    if _tokenizer is None:
+        config = get_config()
+        _tokenizer = AutoTokenizer.from_pretrained(config.embedding_model)
+    return _tokenizer
 
 
 @dataclass
@@ -50,14 +63,6 @@ class NormalizerService:
         """Initialize the normalizer with chunking parameters."""
         self.chunk_size_tokens = chunk_size_tokens
         self.chunk_overlap_tokens = chunk_overlap_tokens
-        self._enc: tiktoken.Encoding | None = None
-
-    @property
-    def enc(self) -> tiktoken.Encoding:
-        """Lazily load tiktoken encoding."""
-        if self._enc is None:
-            self._enc = tiktoken.get_encoding("cl100k_base")
-        return self._enc
 
     def normalize(
         self,
@@ -70,7 +75,7 @@ class NormalizerService:
     ) -> ChunkedDocument:
         """Normalize extracted text and create chunks."""
         start_time = time.perf_counter()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         cleaned_text = self._clean_markdown(extracted_text)
 
@@ -85,7 +90,10 @@ class NormalizerService:
         normalized_text = self._add_frontmatter_to_text(frontmatter, cleaned_text)
 
         word_count = len(cleaned_text.split())
-        token_count = len(self.enc.encode(cleaned_text))
+        tokenizer = get_tokenizer()
+        token_count = len(
+            tokenizer(cleaned_text, add_special_tokens=False)["input_ids"]
+        )
 
         chunks = self._chunk_text(
             sha256=sha256,
@@ -188,7 +196,8 @@ class NormalizerService:
         self, sha256: str, text: str, frontmatter: dict[str, Any]
     ) -> list[Chunk]:
         """Chunk text into fixed-size pieces with overlap."""
-        tokens = self.enc.encode(text)
+        tokenizer = get_tokenizer()
+        tokens = tokenizer(text, add_special_tokens=False)["input_ids"]
         total_tokens = len(tokens)
 
         if total_tokens <= self.chunk_size_tokens:
@@ -211,9 +220,9 @@ class NormalizerService:
             end_idx = min(start_idx + self.chunk_size_tokens, total_tokens)
 
             chunk_tokens = tokens[start_idx:end_idx]
-            chunk_text = self.enc.decode(chunk_tokens)
+            chunk_text = tokenizer.decode(chunk_tokens)
 
-            char_start = len(self.enc.decode(tokens[:start_idx]))
+            char_start = len(tokenizer.decode(tokens[:start_idx]))
             char_end = char_start + len(chunk_text)
 
             chunk = Chunk(

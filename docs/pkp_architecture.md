@@ -7,7 +7,7 @@
 
 Before any design decisions, these constraints shape everything:
 
-1. **Local-first by default**: Compute and source storage stay on-machine. Turso is the accepted cloud dependency for metadata (by design, for future plans). All other services must be local or explicitly opt-in.
+1. **Local-first**: No data leaves the machine without explicit opt-in. No required cloud services.
 2. **Source preservation is immutable**: Original documents are never modified or deleted by the system.
 3. **Markdown vault is the durable truth**: The Obsidian vault is written to *only* after human approval.
 4. **Retrieval index is a rebuildable cache**: If the index is deleted, a single command rebuilds it from stored sources.
@@ -52,7 +52,7 @@ A working MVP has exactly one job: **ingestion → retrieval → proposal → re
 - Knowledge graphs. Do not build a graph in MVP. Vector + BM25 + reranking handles 90% of the connection discovery value at 5% of the complexity.
 - A beautiful frontend. The review queue can be a plain HTML table. Ship the pipeline, not the UI.
 - Custom embedding models. Use an off-the-shelf model. The gain from fine-tuning is marginal against the cost of doing it.
-- An event streaming system. Turso is your job queue. You are one person, processing dozens of documents per day, not millions per second.
+- An event streaming system. SQLite is your job queue. You are one person, processing dozens of documents per day, not millions per second.
 - Semantic chunking. Start with fixed-size + overlap. It works. Optimize later with evidence.
 
 **Phase 2 (after MVP is stable and used daily):**
@@ -92,7 +92,7 @@ A working MVP has exactly one job: **ingestion → retrieval → proposal → re
                    │
 ┌──────────────────▼───────────────────────────────────────────┐
 │                    Pipeline Orchestrator                      │
-│  JobQueue (Turso)  ·  Worker pool (async Python tasks)       │
+│  JobQueue (SQLite)  ·  Worker pool (async Python tasks)     │
 └────┬─────────────┬──────────────┬───────────────┬───────────┘
      │             │              │               │
 ┌────▼────┐  ┌────▼────┐  ┌─────▼─────┐  ┌─────▼──────┐
@@ -104,10 +104,10 @@ A working MVP has exactly one job: **ingestion → retrieval → proposal → re
 ┌────▼────────────▼─────────────▼───────────────▼───────────┐
 │                       Storage Layer                         │
 │                                                             │
-│  /archive/        /vault/           Turso (libSQL)  Qdrant │
-│  (immutable       (Obsidian,        (metadata,      (BGE-M3 │
-│   originals)       human-gated)     jobs, proposals) dense+ │
-│                                                     sparse) │
+│  /archive/        /vault/           metadata.db     Qdrant  │
+│  (immutable       (Obsidian,        (SQLite —       (BGE-M3 │
+│   originals)       human-gated)     docs, jobs,     dense+  │
+│                                     proposals)      sparse) │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -117,7 +117,7 @@ A working MVP has exactly one job: **ingestion → retrieval → proposal → re
 User submits URL
         │
         ▼
-[1] Job created in Turso jobs table (status=pending)
+[1] Job created in SQLite jobs table (status=pending)
         │
         ▼
 [2] Extractor pulls content
@@ -137,13 +137,13 @@ User submits URL
         ▼
 [4] Embedder runs BGE-M3 on each chunk (produces dense + sparse vectors in one pass)
     → Upserts dense + sparse vectors into Qdrant
-    → Records document metadata in Turso documents table
+    → Records document metadata in SQLite documents table
         │
         ▼
 [5] Proposal Engine runs hybrid retrieval via Qdrant native RRF
     Retrieves top-10 candidate documents
     Generates one-sentence rationale per candidate (via LLM or template)
-    → Saves proposals to Turso proposals table (status=pending)
+    → Saves proposals to SQLite proposals table (status=pending)
         │
         ▼
 [6] User opens review queue UI
@@ -152,7 +152,7 @@ User submits URL
     Rejects: proposal marked rejected, never touched again
         │
         ▼
-[7] Job marked complete in Turso
+[7] Job marked complete in SQLite
 ```
 
 ---
@@ -184,13 +184,13 @@ IndexerService
   Input:  NormalizedDocument
   Output: None (side effects only)
   Side effects: Upserts BGE-M3 dense + sparse vectors to Qdrant.
-                Records document metadata in Turso.
+                Records document metadata in SQLite.
   Contract: Idempotent. Re-running on same sha256 is safe.
 
 ProposalEngine
   Input:  NormalizedDocument + Qdrant (read-only)
   Output: List[ConnectionProposal] { doc_a, doc_b, rationale, score }
-  Side effects: Writes to Turso proposals table.
+  Side effects: Writes to SQLite proposals table.
   Contract: Never touches /vault. Never touches source documents.
 
 VaultWriter
@@ -226,44 +226,32 @@ ReviewQueueAPI
 │       ├── chunks.jsonl     # One chunk per line with offsets
 │       └── meta.json        # URL, retrieval date, doc type, title, etc.
 └── db/
-    └── turso.db             # libSQL embedded replica (syncs to Turso remote)
-                             # Contains: documents, chunks, proposals, jobs
+    └── metadata.db          # Single SQLite file (documents, chunks, proposals, jobs)
 # Qdrant runs as a separate local process (Docker or binary)
 # Data stored in Qdrant's own data directory (~/.pkp/qdrant/ if local binary)
 ```
 
-### Turso (libSQL) Schema
+### SQLite Schema
 
-Turso uses the libSQL embedded replica mode: reads are local (no network hop), writes sync to the remote Turso database. Connect at startup with `conn.sync()` to pull the latest state.
-
-```python
-import libsql_experimental as libsql
-
-conn = libsql.connect(
-    database="turso.db",          # local replica file
-    sync_url="libsql://your-db.turso.io",
-    auth_token=os.environ["TURSO_TOKEN"],
-)
-conn.sync()  # pull latest from remote on startup
-```
+Standard `sqlite3` — no extra dependencies, no network, single file. Connect with `aiosqlite` for async access.
 
 ```sql
 -- Core document registry
 CREATE TABLE documents (
-    sha256       TEXT PRIMARY KEY,
-    url          TEXT,
-    title        TEXT,
-    doc_type     TEXT,  -- 'article', 'paper', 'documentation', 'pdf'
-    retrieved_at TEXT NOT NULL,
-    indexed_at   TEXT,
-    word_count   INTEGER,
-    archive_path TEXT NOT NULL,
-    vault_path   TEXT,  -- NULL until written to vault
-    tags         TEXT,  -- JSON array
-    embedded_with TEXT  -- model name used for embedding, e.g. 'BAAI/bge-m3'
+    sha256        TEXT PRIMARY KEY,
+    url           TEXT,
+    title         TEXT,
+    doc_type      TEXT,     -- 'article', 'paper', 'documentation', 'pdf'
+    retrieved_at  TEXT NOT NULL,
+    indexed_at    TEXT,
+    word_count    INTEGER,
+    archive_path  TEXT NOT NULL,
+    vault_path    TEXT,     -- NULL until written to vault
+    tags          TEXT,     -- JSON array
+    embedded_with TEXT      -- model name, e.g. 'BAAI/bge-m3'
 );
 
--- Chunk registry (provenance only — content lives in Qdrant)
+-- Chunk registry (provenance only — content lives in Qdrant payload)
 CREATE TABLE chunks (
     chunk_id     TEXT PRIMARY KEY,  -- sha256 + ':' + chunk_index
     doc_sha256   TEXT NOT NULL REFERENCES documents(sha256),
@@ -275,23 +263,23 @@ CREATE TABLE chunks (
 
 -- Connection proposals (the human review queue)
 CREATE TABLE proposals (
-    proposal_id   TEXT PRIMARY KEY,
-    doc_a_sha256  TEXT NOT NULL REFERENCES documents(sha256),
-    doc_b_sha256  TEXT NOT NULL REFERENCES documents(sha256),
-    score         REAL NOT NULL,
-    rationale     TEXT,
-    status        TEXT NOT NULL DEFAULT 'pending',  -- pending|approved|rejected
-    created_at    TEXT NOT NULL,
-    reviewed_at   TEXT,
-    link_type     TEXT,   -- 'related'|'contradicts'|'extends'|'prerequisite'
-    human_edited  INTEGER DEFAULT 0  -- 1 if user modified the rationale
+    proposal_id  TEXT PRIMARY KEY,
+    doc_a_sha256 TEXT NOT NULL REFERENCES documents(sha256),
+    doc_b_sha256 TEXT NOT NULL REFERENCES documents(sha256),
+    score        REAL NOT NULL,
+    rationale    TEXT,
+    status       TEXT NOT NULL DEFAULT 'pending',  -- pending|approved|rejected
+    created_at   TEXT NOT NULL,
+    reviewed_at  TEXT,
+    link_type    TEXT,     -- 'related'|'contradicts'|'extends'|'prerequisite'
+    human_edited INTEGER DEFAULT 0  -- 1 if user modified the rationale
 );
 
 -- Rejected pairs (never repropose these)
 CREATE TABLE rejected_pairs (
-    doc_a_sha256  TEXT NOT NULL,
-    doc_b_sha256  TEXT NOT NULL,
-    rejected_at   TEXT NOT NULL,
+    doc_a_sha256 TEXT NOT NULL,
+    doc_b_sha256 TEXT NOT NULL,
+    rejected_at  TEXT NOT NULL,
     PRIMARY KEY (doc_a_sha256, doc_b_sha256)
 );
 
@@ -312,7 +300,7 @@ CREATE INDEX idx_proposals_doc_a  ON proposals(doc_a_sha256);
 CREATE INDEX idx_jobs_status      ON jobs(status, created_at);
 ```
 
-**Note on FTS5**: libSQL's FTS5 support is incomplete. Do not build a BM25 index in Turso. Lexical search is handled by Qdrant's sparse vectors (BGE-M3), which replaces FTS5 entirely.
+No FTS5 table. Lexical search is handled entirely by Qdrant's BGE-M3 sparse vectors, which replaces BM25 with a learned sparse representation. One index, one query path.
 
 ### Qdrant Collection Setup
 
@@ -373,11 +361,11 @@ client.upsert(
 
 ### Why This Schema
 
-- `documents` in Turso is the registry. Every query needing document-level metadata goes here. The `embedded_with` field is critical — if the model changes, `rebuild-index` detects the mismatch and re-embeds everything. Mixing BGE-M3 embeddings with another model's embeddings in the same Qdrant collection produces garbage retrieval.
-- `chunks` in Turso records provenance (offsets) only. Chunk content lives in Qdrant payload. No content duplication.
+- `documents` in SQLite is the registry. Every query needing document-level metadata goes here. The `embedded_with` field is critical — if the model changes, `rebuild-index` detects the mismatch and re-embeds everything. Mixing BGE-M3 embeddings with another model's embeddings in the same Qdrant collection produces garbage retrieval.
+- `chunks` in SQLite records provenance (offsets) only. Chunk content lives in Qdrant payload. No content duplication.
 - `proposals` is the human review queue. Status transitions are the only mutations. Approved proposals drive VaultWriter.
 - `rejected_pairs` prevents the system from reproposing connections the user already rejected.
-- `jobs` is the async work queue. Turso with a polling worker is entirely sufficient for a single-user tool. Turso's embedded replica means the poll reads locally — no network round-trip per poll cycle.
+- `jobs` is the async work queue. SQLite with a polling worker is entirely sufficient for a single-user local tool. No Redis. No RabbitMQ.
 - Qdrant sparse vectors replace FTS5/BM25 entirely. BGE-M3's sparse output is a learned sparse representation (similar to SPLADE) that outperforms BM25 on semantic recall while preserving lexical precision. One index, one query path.
 
 ### What NOT to Build in Storage
@@ -479,9 +467,9 @@ This command:
 2. Iterates over every `sha256` directory in `/archive`
 3. Re-chunks and re-embeds from `normalized.md` using BGE-M3
 4. Re-upserts dense + sparse vectors to Qdrant
-5. Updates `indexed_at` and `embedded_with` in Turso
+5. Updates `indexed_at` and `embedded_with` in SQLite
 
-The rebuild must be idempotent and interruptible. Store progress as a `rebuild_index` job row in Turso. Allow resume from last successful `sha256` by checking which documents already exist in the Qdrant collection before upserting.
+The rebuild must be idempotent and interruptible. Store progress as a `rebuild_index` job row in SQLite. Allow resume from last successful `sha256` by checking which documents already exist in the Qdrant collection before upserting.
 
 **Target rebuild performance**: For a personal vault of 5,000 documents, rebuild should complete in under 30 minutes on an RTX 4050. Batch embedding calls — send 32–64 chunks per BGE-M3 inference call, not one at a time.
 
@@ -743,10 +731,9 @@ This requires building an Obsidian plugin (TypeScript), which is a separate code
 
 | Scenario | Prevention |
 |---|---|
-| Embedding model changed | Store `embedded_with` on every document row in Turso. On rebuild, detect mismatch and re-embed everything. |
-| Partial index failure during ingestion | Log failed chunk IDs in Turso. `rebuild` command re-indexes only failed chunks if given `--repair` flag. |
+| Embedding model changed | Store `embedded_with` on every document row in SQLite. On rebuild, detect mismatch and re-embed everything. |
+| Partial index failure during ingestion | Log failed chunk IDs in SQLite. `rebuild` command re-indexes only failed chunks if given `--repair` flag. |
 | Qdrant collection corruption | Qdrant is a cache. Delete collection and rebuild from `chunks.jsonl` in the archive. Source is always the archive. |
-| Turso sync failure | Embedded replica has local state. On reconnect, libSQL syncs automatically. Jobs in-flight are re-tried via status check on startup. |
 
 **Class D: Trust boundary violations** — The system behaves in ways that undermine user trust.
 
@@ -942,11 +929,11 @@ Use `fit_markdown` for LLM calls (lower token cost). Store `raw_markdown` in the
 
 | Option | Pros | Cons |
 |---|---|---|
-| Turso (libSQL) | SQLite-compatible API, embedded replica mode (local reads, remote writes), edge replication for future plans, remote access across devices | Cloud dependency, FTS5 support incomplete in libSQL |
-| SQLite | Zero setup, embedded, FTS5, ACID, widely understood | No remote access, single-device only |
+| SQLite | Zero setup, embedded, ACID, JSON functions, widely understood, single file to back up | Single-writer (fine for this use case), single-device |
+| Turso (libSQL) | SQLite-compatible, remote access, edge replication | Cloud dependency, FTS5 support incomplete, adds network to hot path |
 | PostgreSQL | Production-grade, concurrent, full-featured | Requires server process, overkill for single user |
 
-**Recommendation**: **Turso with embedded replica mode**. Use `libsql_experimental` in Python. The embedded replica gives local read latency on the hot path (job queue polling, metadata lookups) while syncing writes to the remote. This preserves local-first behavior for reads while enabling future multi-device or server-hosted use cases. Do not use Turso's FTS5 — lexical search is handled by Qdrant sparse vectors instead.
+**Recommendation**: **SQLite**. Zero infrastructure. Single file in `~/.pkp/db/metadata.db`. Backs up with `cp`. The single-writer limitation is not a problem for a local personal tool. Do not introduce a network dependency into the metadata hot path — every job queue poll and proposal write goes through this database hundreds of times per day.
 
 ---
 
@@ -954,23 +941,24 @@ Use `fit_markdown` for LLM calls (lower token cost). Store `raw_markdown` in the
 
 | Option | Pros | Cons |
 |---|---|---|
-| Turso jobs table (polling) | Zero additional infrastructure, survives restarts, local replica means reads are fast, consistent with rest of metadata layer | Polling overhead (negligible at this scale) |
+| SQLite jobs table (polling) | Zero additional infrastructure, survives restarts, consistent with metadata layer, simple to understand | Polling overhead (negligible at this scale) |
 | Redis + arq/rq | Well-understood, good for concurrent workers | Requires Redis server, additional infrastructure |
 | Celery + broker | Production-grade, feature-rich | Massive complexity overhead for this use case |
 | asyncio queue (in-memory) | Zero overhead | Lost on process restart |
 
-**Recommendation**: **Turso jobs table with a polling worker**. Poll interval: 1 second. The embedded replica means each poll reads from the local file — no network round-trip per cycle. Entirely sufficient for a personal tool where ingestion throughput is at most a few documents per minute. Survives restarts.
+**Recommendation**: **SQLite jobs table with a polling worker**. Poll interval: 1 second. Entirely sufficient for a personal tool where ingestion throughput is at most a few documents per minute. Survives restarts. No additional infrastructure. Any engineer telling you this needs Kafka is wrong.
 
 ```python
-async def worker_loop(db: TursoDB, interval_seconds: float = 1.0):
+async def worker_loop(db: aiosqlite.Connection, interval_seconds: float = 1.0):
     while True:
         # Claim next job atomically
-        job = await db.execute(
+        async with db.execute(
             "UPDATE jobs SET status='running', started_at=? "
             "WHERE job_id = (SELECT job_id FROM jobs WHERE status='pending' "
             "ORDER BY created_at LIMIT 1) RETURNING *",
             [now()]
-        )
+        ) as cursor:
+            job = await cursor.fetchone()
         if job:
             await process_job(job)
         else:
@@ -1014,7 +1002,7 @@ def embed_chunks(texts: list[str]) -> list[dict]:
     ]
 ```
 
-**Critical**: Store `embedded_with = 'BAAI/bge-m3'` on every document row in Turso. If you ever change models, `pkp index rebuild` detects the mismatch via this field and re-embeds everything. Never mix embeddings from different models in the same Qdrant collection.
+**Critical**: Store `embedded_with = 'BAAI/bge-m3'` on every document row in SQLite. If you ever change models, `pkp index rebuild` detects the mismatch via this field and re-embeds everything. Never mix embeddings from different models in the same Qdrant collection.
 
 ---
 
@@ -1077,7 +1065,7 @@ pkp/
 │   └── proposals.py        # Proposal engine (Qdrant hybrid query)
 ├── storage/
 │   ├── archive.py          # Immutable source archive (filesystem)
-│   ├── db.py               # Turso (libSQL) access layer
+│   ├── db.py               # SQLite access layer (aiosqlite)
 │   └── vectors.py          # Qdrant client wrapper
 ├── vault/
 │   └── writer.py           # VaultWriter (the trusted module)
@@ -1115,11 +1103,11 @@ Wrap in a `uv` or `pipx`-compatible setup for cleaner isolation. Document a `uv 
 
 ## Summary: What To Build, In Order
 
-**Week 1–2**: Archive structure, Turso schema, Crawl4AI + Trafilatura extraction, Docling for PDFs, fixed-size chunking, normalized Markdown output. No embeddings yet. Just get clean documents into `~/.pkp/archive/` with metadata in Turso.
+**Week 1–2**: Archive structure, SQLite schema, Crawl4AI + Trafilatura extraction, Docling for PDFs, fixed-size chunking, normalized Markdown output. No embeddings yet. Just get clean documents into `~/.pkp/archive/` with metadata in `metadata.db`.
 
 **Week 3–4**: BGE-M3 integration, Qdrant collection setup (dense + sparse named vectors), ingestion-time embedding and upsert, Qdrant hybrid query (RRF). CLI `pkp search "query"` that returns results. No proposals yet. Validate retrieval quality manually against a test corpus.
 
-**Week 5–6**: Proposal engine — Qdrant hybrid query at ingestion time, template-based rationales, Turso proposals table, job queue worker. `pkp ingest url` end-to-end without the UI.
+**Week 5–6**: Proposal engine — Qdrant hybrid query at ingestion time, template-based rationales, SQLite proposals table, job queue worker. `pkp ingest url` end-to-end without the UI.
 
 **Week 7–8**: FastAPI review queue. Minimal HTML UI. VaultWriter with markers. End-to-end flow: URL → archive → Qdrant → proposals → review → vault. This is the MVP.
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -292,9 +292,19 @@ async def _do_ingest_url(url: str, show_profile: bool = False) -> dict | None:
             extraction_time_ms=extraction_time_ms,
             normalization_time_ms=chunked.normalization_time_ms,
             archive_time_ms=archive_time_ms,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         await db.insert_metric(metric)
+
+        await _upsert_to_qdrant(
+            extracted.sha256,
+            extracted.doc_type,
+            extracted.title,
+            extracted.url,
+            chunked.chunks,
+        )
+
+        await db.mark_document_indexed(extracted.sha256)
 
         click.echo(f"Archived: {extracted.sha256[:16]} at {doc_dir}")
 
@@ -306,6 +316,99 @@ async def _do_ingest_url(url: str, show_profile: bool = False) -> dict | None:
                 "total_time_ms": total_time_ms,
             }
         return None
+
+
+async def _upsert_to_qdrant(
+    sha256: str,
+    doc_type: str,
+    title: str,
+    url: str | None,
+    chunks: list,
+) -> None:
+    """Embed chunks and upsert to Qdrant.
+
+    Args:
+        sha256: Document SHA256.
+        doc_type: Document type.
+        title: Document title.
+        url: Document URL.
+        chunks: List of Chunk objects.
+    """
+    from pkp.embedder import get_embedder
+    from pkp.pipeline.normalizer import Chunk
+    from pkp.storage.qdrant import ensure_collection, qdrant_available, upsert_vectors
+
+    if not qdrant_available():
+        return
+
+    try:
+        ensure_collection(doc_type)
+    except Exception:
+        return
+
+    embedder = get_embedder()
+
+    chunk_texts = [chunk.text for chunk in chunks]
+    embeddings = embedder.embed_chunks(chunk_texts)
+
+    vectors: list[list[float]] = []
+    sparse_data: list[tuple[list[int], list[float]]] = []
+    payloads: list[dict] = []
+
+    for idx, emb in enumerate(embeddings):
+        chunk = chunks[idx]
+        if isinstance(chunk, Chunk):
+            payload = {
+                "chunk_id": chunk.chunk_id,
+                "doc_sha256": sha256,
+                "chunk_index": chunk.chunk_index,
+                "content": chunk.text,
+                "char_start": chunk.char_start,
+                "char_end": chunk.char_end,
+                "token_count": chunk.token_count,
+                "title": title,
+                "url": url,
+                "doc_type": doc_type,
+            }
+        else:
+            payload = {
+                "chunk_id": f"{sha256}:{idx}",
+                "doc_sha256": sha256,
+                "chunk_index": idx,
+                "content": chunk.text,
+                "title": title,
+                "url": url,
+                "doc_type": doc_type,
+            }
+
+        vectors.append(emb.dense.tolist())
+
+        indices, values = embedder.tokens_to_indices(chunk.text, emb.sparse[0])
+        sparse_data.append((indices, values))
+
+        payloads.append(payload)
+
+    try:
+        chunk_ids = [c.chunk_id for c in chunks]
+        upsert_vectors(
+            doc_type=doc_type,
+            chunk_ids=chunk_ids,
+            dense_vectors=vectors,
+            sparse_data=sparse_data,
+            payloads=payloads,
+        )
+    except Exception as e:
+        click.echo(f"Error upserting to Qdrant: {e}", err=True)
+        try:
+            upsert_vectors(
+                doc_type=doc_type,
+                chunk_ids=chunk_ids,
+                dense_vectors=vectors,
+                sparse_data=sparse_data,
+                payloads=payloads,
+            )
+        except Exception as e2:
+            click.echo(f"Retry failed: {e2}", err=True)
 
 
 async def _queue_ingest_job(job_type: str, payload: dict) -> None:
@@ -471,9 +574,19 @@ async def _do_ingest_pdf(pdf_path: Path, show_profile: bool = False) -> dict | N
             extraction_time_ms=extraction_time_ms,
             normalization_time_ms=chunked.normalization_time_ms,
             archive_time_ms=archive_time_ms,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         await db.insert_metric(metric)
+
+        await _upsert_to_qdrant(
+            extracted.sha256,
+            extracted.doc_type,
+            extracted.title,
+            extracted.url,
+            chunked.chunks,
+        )
+
+        await db.mark_document_indexed(extracted.sha256)
 
         click.echo(f"Archived: {extracted.sha256[:16]} at {doc_dir}")
 
@@ -504,18 +617,29 @@ def serve(host: str, port: int) -> None:
 @click.argument("query")
 @click.option("--limit", "-n", default=10, help="Max results")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
-def search(query: str, limit: int, json_output: bool) -> None:
-    """Search archived documents using FTS5."""
-    asyncio.run(_do_search(query, limit, json_output))
+@click.option("--fts", "use_fts", is_flag=True, help="Force FTS5 search")
+def search(query: str, limit: int, json_output: bool, use_fts: bool) -> None:
+    """Search archived documents using Qdrant (hybrid) or FTS5."""
+    asyncio.run(_do_search(query, limit, json_output, use_fts))
 
 
-async def _do_search(query: str, limit: int, json_output: bool) -> None:
+async def _do_search(
+    query: str, limit: int, json_output: bool, use_fts: bool = False
+) -> None:
     """Perform document search."""
     from pkp.storage.db import db_context
+    from pkp.storage.qdrant import qdrant_available, search_documents_hybrid
 
     try:
-        async with db_context() as db:
-            results = await db.search_documents(query, limit)
+        if use_fts:
+            async with db_context() as db:
+                results = await db.search_documents(query, limit)
+        else:
+            if qdrant_available():
+                results = await search_documents_hybrid(query, limit)
+            else:
+                async with db_context() as db:
+                    results = await db.search_documents(query, limit)
 
             if json_output:
                 import json
@@ -572,6 +696,167 @@ def status() -> None:
     archive = ArchiveManager(config.archive_path)
     documents = archive.list_all_documents()
     click.echo(f"Documents: {len(documents)}")
+
+
+@main.command()
+@click.option(
+    "--all",
+    "rebuild_all",
+    is_flag=True,
+    default=False,
+    help="Rebuild all documents (not just repair mode)",
+)
+@click.option("--doc-type", default=None, help="Filter by doc_type (article, pdf, etc)")
+def rebuild_index(rebuild_all: bool, doc_type: str | None) -> None:
+    """Rebuild Qdrant index from archived chunks.
+
+    Repair mode (default): Skip documents already indexed in Qdrant.
+    --all: Drop all collections and re-index everything fresh.
+    """
+    asyncio.run(_do_rebuild_index(doc_type, rebuild_all))
+
+
+async def _do_rebuild_index(
+    filter_doc_type: str | None, rebuild_all: bool = False
+) -> None:
+    """Rebuild Qdrant index from archived chunks."""
+    import json
+    from pathlib import Path
+
+    from pkp.config import get_config
+    from pkp.embedder import get_embedder
+    from pkp.storage.db import db_context
+    from pkp.storage.qdrant import (
+        _get_collection_name,
+        _get_qdrant_client,
+        ensure_collection,
+        qdrant_available,
+        upsert_vectors,
+    )
+
+    config = get_config()
+    if config.archive_path is None:
+        click.echo("Archive path not configured")
+        return
+
+    if not qdrant_available():
+        click.echo("Qdrant not available")
+        return
+
+    client = _get_qdrant_client()
+
+    async with db_context() as db:
+        documents = await db.get_all_documents()
+
+        if rebuild_all:
+            doc_types = await db.get_distinct_doc_types()
+        else:
+            doc_types = []
+
+    if rebuild_all:
+        click.echo("Dropping all collections for rebuild...")
+        for dtype in doc_types:
+            if filter_doc_type and dtype != filter_doc_type:
+                continue
+            collection_name = _get_collection_name(dtype)
+            try:
+                client.delete_collection(collection_name=collection_name)
+                click.echo(f"Dropped {collection_name}")
+            except Exception:
+                pass
+
+        for dtype in doc_types:
+            if filter_doc_type and dtype != filter_doc_type:
+                continue
+            ensure_collection(dtype)
+            click.echo(f"Created collection: {dtype}_v1")
+
+    total_upserted = 0
+    total_docs = 0
+
+    for doc in documents:
+        if filter_doc_type and doc.doc_type != filter_doc_type:
+            continue
+
+        total_docs += 1
+        doc_dir = Path(doc.archive_path)
+
+        chunks_file = doc_dir / "chunks.jsonl"
+        if not chunks_file.exists():
+            click.echo(f"Skipping {doc.sha256[:16]}: no chunks file")
+            continue
+
+        collection_name = _get_collection_name(doc.doc_type)
+
+        try:
+            client.scroll(collection_name=collection_name, limit=1, with_payload=False)
+        except Exception:
+            try:
+                ensure_collection(doc.doc_type)
+            except Exception as e:
+                click.echo(f"Skipping {doc.doc_type}: {e}")
+                continue
+
+        chunks: list[dict] = []
+        with open(chunks_file, encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    chunks.append(json.loads(line))
+
+        if not chunks:
+            continue
+
+        try:
+            embedder = get_embedder()
+
+            chunk_texts = [c["content"] for c in chunks]
+            embeddings = embedder.embed_chunks(chunk_texts)
+
+            vectors: list[list[float]] = []
+            sparse_data: list[tuple[list[int], list[float]]] = []
+            payloads: list[dict] = []
+
+            for idx, emb in enumerate(embeddings):
+                chunk = chunks[idx]
+                payload = {
+                    "chunk_id": chunk["chunk_id"],
+                    "doc_sha256": doc.sha256,
+                    "chunk_index": chunk["chunk_index"],
+                    "content": chunk["content"],
+                    "char_start": chunk.get("char_start", 0),
+                    "char_end": chunk.get("char_end", 0),
+                    "token_count": chunk.get("token_count"),
+                    "title": doc.title,
+                    "url": doc.url,
+                    "doc_type": doc.doc_type,
+                }
+
+                vectors.append(emb.dense.tolist())
+
+                indices, values = embedder.tokens_to_indices(
+                    chunk["content"], emb.sparse[0]
+                )
+                sparse_data.append((indices, values))
+
+                payloads.append(payload)
+
+            chunk_ids = [c["chunk_id"] for c in chunks]
+            upsert_vectors(
+                doc_type=doc.doc_type,
+                chunk_ids=chunk_ids,
+                dense_vectors=vectors,
+                sparse_data=sparse_data,
+                payloads=payloads,
+            )
+
+            total_upserted += len(chunks)
+            click.echo(f"Indexed {doc.sha256[:16]}: {len(chunks)} chunks")
+
+        except Exception as e:
+            click.echo(f"Error indexing {doc.sha256[:16]}: {e}")
+            continue
+
+    click.echo(f"Done: {total_upserted} chunks indexed from {total_docs} documents")
 
 
 if __name__ == "__main__":

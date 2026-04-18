@@ -13,7 +13,14 @@ from pydantic import BaseModel
 
 from pkp import __version__
 from pkp.config import get_config
-from pkp.storage.db import Database, get_database
+from pkp.storage.db import (
+    Database,
+    get_database,
+)
+from pkp.storage.qdrant import (
+    qdrant_available,
+    search_documents_hybrid,
+)
 
 
 class ServiceHealth(BaseModel):
@@ -194,9 +201,17 @@ class SearchResponse(BaseModel):
 
 @app.get("/search", response_model=SearchResponse)
 async def search(q: str, limit: int = 10) -> SearchResponse:
-    """Search archived documents using FTS5."""
-    db = await _get_db()
-    results = await db.search_documents(q, limit)
+    """Search archived documents using Qdrant (hybrid) or FTS5."""
+    try:
+        if qdrant_available():
+            results = await search_documents_hybrid(q, limit)
+        else:
+            db = await _get_db()
+            results = await db.search_documents(q, limit)
+    except Exception:
+        db = await _get_db()
+        results = await db.search_documents(q, limit)
+
     return SearchResponse(
         query=q,
         results=[
