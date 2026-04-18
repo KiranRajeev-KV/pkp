@@ -35,27 +35,22 @@ class HealthResponse(BaseModel):
 
 SERVICES = {
     "crawl4ai": "http://localhost:11235",
-    "turso": "http://localhost:8080",
     "qdrant": "http://localhost:6333",
 }
 
 EXPECTED_STATUS = {
     "crawl4ai": 200,
-    "turso": 404,
     "qdrant": 200,
 }
 
 SERVICE_PATHS = {
     "crawl4ai": "/health",
-    "turso": "",
     "qdrant": "/",
 }
 
 
 async def check_service(name: str, url: str) -> tuple[str, ServiceHealth]:
     """Check a single service's health."""
-    if name == "turso":
-        return await _check_turso()
     path = SERVICE_PATHS.get(name, "/health")
     expected = EXPECTED_STATUS.get(name, 200)
     try:
@@ -73,7 +68,7 @@ async def check_service(name: str, url: str) -> tuple[str, ServiceHealth]:
                     or "unknown"
                 )
             else:
-                version = "0.24.33"
+                version = data.get("version", "") or "unknown"
             return name, ServiceHealth(status="ok", version=version)
     except httpx.TimeoutException:
         return name, ServiceHealth(status="error", message="timeout")
@@ -81,20 +76,6 @@ async def check_service(name: str, url: str) -> tuple[str, ServiceHealth]:
         return name, ServiceHealth(status="error", message="connection failed")
     except Exception as e:
         return name, ServiceHealth(status="error", message=str(e)[:50])
-
-
-async def _check_turso() -> tuple[str, ServiceHealth]:
-    """Check Turso health via actual SQL query."""
-    import libsql_client
-
-    try:
-        async with libsql_client.create_client("http://localhost:8080") as client:
-            result = await client.execute("SELECT 1 as health_check")
-            if result.rows and len(result.rows) > 0:
-                return "turso", ServiceHealth(status="ok", version="0.24.33")
-            return "turso", ServiceHealth(status="error", message="no rows returned")
-    except Exception as e:
-        return "turso", ServiceHealth(status="error", message=str(e)[:50])
 
 
 class DatabaseDependency:
@@ -191,3 +172,42 @@ async def root() -> dict[str, str]:
         "name": "PKP - Personal Knowledge Pipeline",
         "version": __version__,
     }
+
+
+class SearchResult(BaseModel):
+    """Search result at document level."""
+
+    doc_sha256: str
+    title: str
+    url: str | None
+    match_count: int
+    best_rank: float
+
+
+class SearchResponse(BaseModel):
+    """Search response."""
+
+    query: str
+    results: list[SearchResult]
+    total: int
+
+
+@app.get("/search", response_model=SearchResponse)
+async def search(q: str, limit: int = 10) -> SearchResponse:
+    """Search archived documents using FTS5."""
+    db = await _get_db()
+    results = await db.search_documents(q, limit)
+    return SearchResponse(
+        query=q,
+        results=[
+            SearchResult(
+                doc_sha256=r.doc_sha256,
+                title=r.title,
+                url=r.url,
+                match_count=r.match_count,
+                best_rank=r.best_rank,
+            )
+            for r in results
+        ],
+        total=len(results),
+    )
