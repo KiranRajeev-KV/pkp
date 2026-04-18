@@ -11,40 +11,40 @@ default:
 
 # Run all code quality checks
 check:
-    ruff check pkp/
-    ruff format --check pkp/
-    mypy pkp/
-    bandit -c pyproject.toml -r pkp/
-    xenon --max-absolute C --max-modules C --max-average A pkp/
-    pip-audit
+    uv run ruff check pkp/
+    uv run ruff format --check pkp/
+    uv run mypy pkp/
+    uv run bandit -c pyproject.toml -r pkp/
+    uv run xenon --max-absolute C --max-modules C --max-average A pkp/
+    uv run pip-audit
 
 # Run ruff linter
 lint:
-    ruff check pkp/
+    uv run ruff check pkp/
 
 # Run ruff formatter check
 format-check:
-    ruff format --check pkp/
+    uv run ruff format --check pkp/
 
 # Run ruff formatter (fix)
 format:
-    ruff format pkp/
+    uv run ruff format pkp/
 
 # Run mypy type checking
 typecheck:
-    mypy pkp/
+    uv run mypy pkp/
 
 # Run bandit security scanner
 security:
-    bandit -c pyproject.toml -r pkp/
+    uv run bandit -c pyproject.toml -r pkp/
 
 # Run radon complexity analysis
 complexity:
-    radon cc -a -i pkp/ && xenon --max-absolute C --max-modules C --max-average A pkp/
+    uv run radon cc -a -i pkp/ && uv run xenon --max-absolute C --max-modules C --max-average A pkp/
 
 # Run pip-audit vulnerability scan
 vulns:
-    pip-audit
+    uv run pip-audit
 
 # =============================================================================
 # Pre-commit hooks
@@ -52,15 +52,15 @@ vulns:
 
 # Install pre-commit hooks
 hook-install:
-    pre-commit install
+    uv run pre-commit install
 
 # Run pre-commit hooks on all files
 hook-run-all:
-    pre-commit run -a
+    uv run pre-commit run -a
 
 # Update pre-commit hook versions
 hook-update:
-    pre-commit autoupdate
+    uv run pre-commit autoupdate
 
 # =============================================================================
 # Testing
