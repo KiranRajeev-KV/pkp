@@ -1,0 +1,59 @@
+services:
+  crawl4ai:
+    image: unclecode/crawl4ai:0.7.3
+    container_name: pkp_crawl4ai
+    ports:
+      - "11235:11235"
+    volumes:
+      - crawl4ai_cache:/dev/shm
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11235/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  turso:
+    image: ghcr.io/tursodatabase/libsql-server:latest
+    platform: linux/amd64
+    container_name: pkp_turso
+    ports:
+      - "8080:8080"
+      - "5001:5001"
+    environment:
+      - SQLD_NODE=primary
+    volumes:
+      - turso_data:/var/lib/sqld
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  qdrant:
+    image: qdrant/qdrant:v1.14.0
+    container_name: pkp_qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  crawl4ai_cache:
+  turso_data:
+  qdrant_data:
