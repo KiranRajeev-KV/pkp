@@ -19,6 +19,8 @@ class PKPConfig:
     archive_path: Path | None = None
     index_path: Path | None = None
 
+    user_agent: str = "PKP/0.1.0 (https://github.com/KiranRajeev-KV/pkp)"
+
     embedding_model: str = "nomic-embed-text"
     embedding_endpoint: str = "http://localhost:11434"
     embedding_dimension: int = 768
@@ -63,6 +65,7 @@ class PKPConfig:
             "db_path": str(self.db_path) if self.db_path else None,
             "archive_path": str(self.archive_path) if self.archive_path else None,
             "index_path": str(self.index_path) if self.index_path else None,
+            "user_agent": self.user_agent,
             "embedding_model": self.embedding_model,
             "embedding_endpoint": self.embedding_endpoint,
             "embedding_dimension": self.embedding_dimension,
@@ -85,6 +88,9 @@ class PKPConfig:
             if data.get("archive_path")
             else None,
             index_path=Path(data["index_path"]) if data.get("index_path") else None,
+            user_agent=data.get(
+                "user_agent", "PKP/0.1.0 (https://github.com/KiranRajeev-KV/pkp)"
+            ),
             embedding_model=data.get("embedding_model", "nomic-embed-text"),
             embedding_endpoint=data.get("embedding_endpoint", "http://localhost:11434"),
             embedding_dimension=data.get("embedding_dimension", 768),
