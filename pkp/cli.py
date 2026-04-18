@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -13,12 +15,11 @@ from pkp.config import get_config, load_config, save_config
 from pkp.pipeline.extractor import (
     ExtractionError,
     ExtractorService,
-    ParserError,
     SourceRequest,
 )
 from pkp.pipeline.normalizer import NormalizerService
 from pkp.storage.archive import ArchiveManager, DocumentMetadata
-from pkp.storage.db import Document, get_database
+from pkp.storage.db import Document, IngestionMetric, db_context, get_database
 
 
 @click.group()
@@ -81,19 +82,27 @@ def init(data_dir: Path | None, vault_path: Path | None) -> None:
     is_flag=True,
     help="Run ingestion asynchronously",
 )
-def ingest_url(url: str, run_async: bool) -> None:
+@click.option(
+    "--profile",
+    "show_profile",
+    is_flag=True,
+    help="Show timing information",
+)
+def ingest_url(url: str, run_async: bool, show_profile: bool) -> None:
     """Ingest content from a URL."""
     if run_async:
         _ingest_url_async(url)
     else:
-        asyncio.run(_ingest_url_sync(url))
+        asyncio.run(_ingest_url_sync(url, show_profile))
 
 
-async def _ingest_url_sync(url: str) -> None:
+async def _ingest_url_sync(url: str, show_profile: bool = False) -> None:
     """Sync URL ingestion."""
     try:
         async with asyncio.timeout(120):
-            await _do_ingest_url(url)
+            timing = await _do_ingest_url(url, show_profile)
+            if timing and show_profile:
+                _print_timing(timing)
     except TimeoutError:
         click.echo(f"Error: Timeout ingesting {url}", err=True)
         sys.exit(1)
@@ -107,8 +116,21 @@ def _ingest_url_async(url: str) -> None:
     asyncio.run(_queue_ingest_job("ingest_url", {"url": url}))
 
 
-async def _do_ingest_url(url: str) -> None:
+def _print_timing(timing: dict) -> None:
+    """Print timing information."""
+    if timing.get("extraction_time_ms"):
+        click.echo(f"[TIMER] extraction: {timing['extraction_time_ms']}ms")
+    if timing.get("normalization_time_ms"):
+        click.echo(f"[TIMER] normalization: {timing['normalization_time_ms']}ms")
+    if timing.get("archive_time_ms"):
+        click.echo(f"[TIMER] archive: {timing['archive_time_ms']}ms")
+    if timing.get("total_time_ms"):
+        click.echo(f"[TIMER] total: {timing['total_time_ms']}ms")
+
+
+async def _do_ingest_url(url: str, show_profile: bool = False) -> dict | None:
     """Perform URL ingestion."""
+    total_start = time.perf_counter()
     config = get_config()
     if config.archive_path is None:
         raise RuntimeError("Archive path not configured")
@@ -119,11 +141,21 @@ async def _do_ingest_url(url: str) -> None:
     extractor = ExtractorService()
     extracted = await extractor.extract(SourceRequest(url=url))
 
+    extraction_time_ms = extracted.extraction_time_ms
+
     click.echo(f"Extracted: {extracted.title} ({extracted.sha256[:16]}...)")
 
     if archive.document_exists(extracted.sha256):
         click.echo(f"Document already archived: {extracted.sha256[:16]}")
-        return
+        total_time_ms = int((time.perf_counter() - total_start) * 1000)
+        if show_profile:
+            return {
+                "extraction_time_ms": extraction_time_ms,
+                "normalization_time_ms": 0,
+                "archive_time_ms": 0,
+                "total_time_ms": total_time_ms,
+            }
+        return None
 
     chunk_size = config.chunk_size_tokens
     chunk_overlap = config.chunk_overlap_tokens
@@ -159,6 +191,8 @@ async def _do_ingest_url(url: str) -> None:
     chunks_json = normalizer.chunks_to_jsonl(chunked.chunks)
     archive.write_chunks(extracted.sha256, chunks_json)
 
+    archive_start = time.perf_counter()
+
     metadata = DocumentMetadata(
         url=extracted.url,
         sha256=extracted.sha256,
@@ -171,30 +205,54 @@ async def _do_ingest_url(url: str) -> None:
     )
     archive.write_metadata(extracted.sha256, metadata)
 
-    db = await get_database()
-    doc = Document(
-        sha256=extracted.sha256,
-        url=extracted.url,
-        title=extracted.title,
-        doc_type=extracted.doc_type,
-        retrieved_at=chunked.retrieved_at,
-        word_count=chunked.word_count,
-        archive_path=str(doc_dir),
-        tags=[],
-    )
-    await db.insert_document(doc)
+    async with db_context() as db:
+        doc = Document(
+            sha256=extracted.sha256,
+            url=extracted.url,
+            title=extracted.title,
+            doc_type=extracted.doc_type,
+            retrieved_at=chunked.retrieved_at,
+            word_count=chunked.word_count,
+            archive_path=str(doc_dir),
+            tags=[],
+        )
+        await db.insert_document(doc)
 
-    click.echo(f"Archived: {extracted.sha256[:16]} at {doc_dir}")
+        archive_time_ms = int((time.perf_counter() - archive_start) * 1000)
+        total_time_ms = int((time.perf_counter() - total_start) * 1000)
+
+        metric = IngestionMetric(
+            doc_sha256=extracted.sha256,
+            doc_type=extracted.doc_type,
+            source=url,
+            total_time_ms=total_time_ms,
+            extraction_time_ms=extraction_time_ms,
+            normalization_time_ms=chunked.normalization_time_ms,
+            archive_time_ms=archive_time_ms,
+            created_at=datetime.utcnow(),
+        )
+        await db.insert_metric(metric)
+
+        click.echo(f"Archived: {extracted.sha256[:16]} at {doc_dir}")
+
+        if show_profile:
+            return {
+                "extraction_time_ms": extraction_time_ms,
+                "normalization_time_ms": chunked.normalization_time_ms,
+                "archive_time_ms": archive_time_ms,
+                "total_time_ms": total_time_ms,
+            }
+        return None
 
 
 async def _queue_ingest_job(job_type: str, payload: dict) -> None:
     """Queue an ingestion job."""
     import uuid
 
-    db = await get_database()
-    job_id = f"{job_type}-{uuid.uuid4().hex[:8]}"
-    await db.create_job(job_id, job_type, payload)
-    click.echo(f"Queued job: {job_id}")
+    async with db_context() as db:
+        job_id = f"{job_type}-{uuid.uuid4().hex[:8]}"
+        await db.create_job(job_id, job_type, payload)
+        click.echo(f"Queued job: {job_id}")
 
 
 @main.command()
@@ -205,19 +263,27 @@ async def _queue_ingest_job(job_type: str, payload: dict) -> None:
     is_flag=True,
     help="Run ingestion asynchronously",
 )
-def ingest_pdf(pdf_path: Path, run_async: bool) -> None:
+@click.option(
+    "--profile",
+    "show_profile",
+    is_flag=True,
+    help="Show timing information",
+)
+def ingest_pdf(pdf_path: Path, run_async: bool, show_profile: bool) -> None:
     """Ingest content from a PDF file."""
     if run_async:
         _ingest_pdf_async(pdf_path)
     else:
-        asyncio.run(_ingest_pdf_sync(pdf_path))
+        asyncio.run(_ingest_pdf_sync(pdf_path, show_profile))
 
 
-async def _ingest_pdf_sync(pdf_path: Path) -> None:
+async def _ingest_pdf_sync(pdf_path: Path, show_profile: bool = False) -> None:
     """Sync PDF ingestion."""
     try:
         async with asyncio.timeout(300):
-            await _do_ingest_pdf(pdf_path)
+            timing = await _do_ingest_pdf(pdf_path, show_profile)
+            if timing and show_profile:
+                _print_timing(timing)
     except TimeoutError:
         click.echo(f"Error: Timeout ingesting {pdf_path}", err=True)
         sys.exit(1)
@@ -231,8 +297,9 @@ def _ingest_pdf_async(pdf_path: Path) -> None:
     asyncio.run(_queue_ingest_job("ingest_pdf", {"pdf_path": str(pdf_path)}))
 
 
-async def _do_ingest_pdf(pdf_path: Path) -> None:
+async def _do_ingest_pdf(pdf_path: Path, show_profile: bool = False) -> dict | None:
     """Perform PDF ingestion."""
+    total_start = time.perf_counter()
     config = get_config()
     if config.archive_path is None:
         raise RuntimeError("Archive path not configured")
@@ -240,21 +307,26 @@ async def _do_ingest_pdf(pdf_path: Path) -> None:
 
     click.echo(f"Extracting {pdf_path}...")
 
+    extractor = ExtractorService()
+    extracted = await extractor.extract(SourceRequest(pdf_path=pdf_path))
+
     original_content = pdf_path.read_bytes()
 
-    extractor = ExtractorService()
-
-    try:
-        extracted = await extractor.extract(SourceRequest(pdf_path=pdf_path))
-    except ParserError as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
+    extraction_time_ms = extracted.extraction_time_ms
 
     click.echo(f"Extracted: {extracted.title} ({extracted.sha256[:16]}...)")
 
     if archive.document_exists(extracted.sha256):
         click.echo(f"Document already archived: {extracted.sha256[:16]}")
-        return
+        total_time_ms = int((time.perf_counter() - total_start) * 1000)
+        if show_profile:
+            return {
+                "extraction_time_ms": extraction_time_ms,
+                "normalization_time_ms": 0,
+                "archive_time_ms": 0,
+                "total_time_ms": total_time_ms,
+            }
+        return None
 
     chunk_size = config.chunk_size_tokens
     chunk_overlap = config.chunk_overlap_tokens
@@ -285,6 +357,8 @@ async def _do_ingest_pdf(pdf_path: Path) -> None:
     chunks_json = normalizer.chunks_to_jsonl(chunked.chunks)
     archive.write_chunks(extracted.sha256, chunks_json)
 
+    archive_start = time.perf_counter()
+
     metadata = DocumentMetadata(
         url=extracted.url,
         sha256=extracted.sha256,
@@ -297,20 +371,44 @@ async def _do_ingest_pdf(pdf_path: Path) -> None:
     )
     archive.write_metadata(extracted.sha256, metadata)
 
-    db = await get_database()
-    doc = Document(
-        sha256=extracted.sha256,
-        url=extracted.url,
-        title=extracted.title,
-        doc_type=extracted.doc_type,
-        retrieved_at=chunked.retrieved_at,
-        word_count=chunked.word_count,
-        archive_path=str(doc_dir),
-        tags=[],
-    )
-    await db.insert_document(doc)
+    async with db_context() as db:
+        doc = Document(
+            sha256=extracted.sha256,
+            url=extracted.url,
+            title=extracted.title,
+            doc_type=extracted.doc_type,
+            retrieved_at=chunked.retrieved_at,
+            word_count=chunked.word_count,
+            archive_path=str(doc_dir),
+            tags=[],
+        )
+        await db.insert_document(doc)
 
-    click.echo(f"Archived: {extracted.sha256[:16]} at {doc_dir}")
+        archive_time_ms = int((time.perf_counter() - archive_start) * 1000)
+        total_time_ms = int((time.perf_counter() - total_start) * 1000)
+
+        metric = IngestionMetric(
+            doc_sha256=extracted.sha256,
+            doc_type=extracted.doc_type,
+            source=str(pdf_path),
+            total_time_ms=total_time_ms,
+            extraction_time_ms=extraction_time_ms,
+            normalization_time_ms=chunked.normalization_time_ms,
+            archive_time_ms=archive_time_ms,
+            created_at=datetime.utcnow(),
+        )
+        await db.insert_metric(metric)
+
+        click.echo(f"Archived: {extracted.sha256[:16]} at {doc_dir}")
+
+        if show_profile:
+            return {
+                "extraction_time_ms": extraction_time_ms,
+                "normalization_time_ms": chunked.normalization_time_ms,
+                "archive_time_ms": archive_time_ms,
+                "total_time_ms": total_time_ms,
+            }
+        return None
 
 
 @main.command()
