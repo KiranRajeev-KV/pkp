@@ -8,9 +8,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import aiosqlite
 import click
 import httpx
-import libsql_client
 
 from pkp import __version__
 from pkp.config import get_config, load_config, save_config
@@ -63,12 +63,26 @@ def init(data_dir: Path | None, vault_path: Path | None) -> None:
     if config.vault_path:
         click.echo(f"Vault: {config.vault_path}")
 
+    asyncio.run(_init_database(config.db_path))  # type: ignore[arg-type]
+
     click.echo("\nChecking external services...")
 
     try:
         asyncio.run(_check_services())
     except Exception as e:
         click.echo(f"Service check failed: {e}", err=True)
+
+
+async def _init_database(db_path: Path) -> None:
+    """Initialize the database with schema."""
+    from pkp.storage.db import Database
+
+    try:
+        db = Database(db_path)
+        await db.connect()
+        await db.close()
+    except Exception as e:
+        click.echo(f"Database initialization failed: {e}", err=True)
 
 
 async def _check_services() -> None:
@@ -96,17 +110,18 @@ async def _check_services() -> None:
             except Exception as e:
                 click.echo(f"{name}: ERROR - {e}", err=True)
 
+    config = get_config()
     try:
-        async with libsql_client.create_client("http://localhost:8080") as client:
-            result = await client.execute("SELECT 1 as health")
-            if result.rows and len(result.rows) > 0:
-                click.echo("Turso: OK (v0.24.33)")
-            else:
-                click.echo("Turso: ERROR - no rows returned", err=True)
-    except httpx.ConnectError:
-        click.echo("Turso: ERROR - connection failed", err=True)
+        if config.db_path is None or not config.db_path.exists():
+            click.echo("SQLite: ERROR - database not configured", err=True)
+        else:
+            async with aiosqlite.connect(str(config.db_path)) as db:
+                await db.execute("SELECT 1")
+                click.echo("SQLite: OK (local file)")
+    except FileNotFoundError:
+        click.echo("SQLite: ERROR - database not found", err=True)
     except Exception as e:
-        click.echo(f"Turso: ERROR - {e}", err=True)
+        click.echo(f"SQLite: ERROR - {e}", err=True)
 
 
 @main.command()
@@ -252,6 +267,19 @@ async def _do_ingest_url(url: str, show_profile: bool = False) -> dict | None:
             tags=[],
         )
         await db.insert_document(doc)
+
+        from pkp.storage.db import Chunk as DBChunk
+
+        for idx, chunk in enumerate(chunked.chunks):
+            chunk_record = DBChunk(
+                chunk_id=f"{extracted.sha256}:{idx}",
+                doc_sha256=extracted.sha256,
+                chunk_index=idx,
+                char_start=chunk.char_start,
+                char_end=chunk.char_end,
+                token_count=chunk.token_count,
+            )
+            await db.insert_chunk(chunk_record, chunk.text)
 
         archive_time_ms = int((time.perf_counter() - archive_start) * 1000)
         total_time_ms = int((time.perf_counter() - total_start) * 1000)
@@ -419,6 +447,19 @@ async def _do_ingest_pdf(pdf_path: Path, show_profile: bool = False) -> dict | N
         )
         await db.insert_document(doc)
 
+        from pkp.storage.db import Chunk as DBChunk
+
+        for idx, chunk in enumerate(chunked.chunks):
+            chunk_record = DBChunk(
+                chunk_id=f"{extracted.sha256}:{idx}",
+                doc_sha256=extracted.sha256,
+                chunk_index=idx,
+                char_start=chunk.char_start,
+                char_end=chunk.char_end,
+                token_count=chunk.token_count,
+            )
+            await db.insert_chunk(chunk_record, chunk.text)
+
         archive_time_ms = int((time.perf_counter() - archive_start) * 1000)
         total_time_ms = int((time.perf_counter() - total_start) * 1000)
 
@@ -457,6 +498,59 @@ def serve(host: str, port: int) -> None:
 
     click.echo(f"Starting PKP API server at http://{host}:{port}")
     uvicorn.run(app, host=host, port=port)
+
+
+@main.command()
+@click.argument("query")
+@click.option("--limit", "-n", default=10, help="Max results")
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON")
+def search(query: str, limit: int, json_output: bool) -> None:
+    """Search archived documents using FTS5."""
+    asyncio.run(_do_search(query, limit, json_output))
+
+
+async def _do_search(query: str, limit: int, json_output: bool) -> None:
+    """Perform document search."""
+    from pkp.storage.db import db_context
+
+    try:
+        async with db_context() as db:
+            results = await db.search_documents(query, limit)
+
+            if json_output:
+                import json
+
+                output = [
+                    {
+                        "doc_sha256": r.doc_sha256,
+                        "title": r.title,
+                        "url": r.url,
+                        "match_count": r.match_count,
+                        "best_rank": r.best_rank,
+                    }
+                    for r in results
+                ]
+                click.echo(json.dumps(output, indent=2))
+                return
+
+            if not results:
+                click.echo("No results found.")
+                return
+
+            click.echo(f"{'TITLE':<25} {'URL':<30} {'CHUNKS':<8} {'RANK'}")
+            click.echo("-" * 75)
+
+            for r in results:
+                title = r.title[:24] if len(r.title) > 24 else r.title
+                url = r.url or ""
+                if len(url) > 29:
+                    url = url[:26] + "..."
+                click.echo(
+                    f"{title:<25} {url:<30} {r.match_count:<8} {r.best_rank:.2f}"
+                )
+
+    except Exception as e:
+        click.echo(f"Search error: {e}", err=True)
 
 
 @main.command()
