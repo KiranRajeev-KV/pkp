@@ -72,6 +72,20 @@ class Job:
     error: str | None = None
 
 
+@dataclass
+class IngestionMetric:
+    """Timing metrics for an ingestion."""
+
+    doc_sha256: str = ""
+    doc_type: str = ""
+    source: str | None = None
+    total_time_ms: int = 0
+    extraction_time_ms: int | None = None
+    normalization_time_ms: int | None = None
+    archive_time_ms: int | None = None
+    created_at: datetime | None = None
+
+
 SCHEMA = """
 -- Core document registry
 CREATE TABLE IF NOT EXISTS documents (
@@ -141,11 +155,26 @@ CREATE TABLE IF NOT EXISTS rejected_pairs (
     PRIMARY KEY (doc_a_sha256, doc_b_sha256)
 );
 
+-- Ingestion timing metrics
+CREATE TABLE IF NOT EXISTS ingestion_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_sha256 TEXT NOT NULL,
+    doc_type TEXT NOT NULL,
+    source TEXT,
+    total_time_ms INTEGER NOT NULL,
+    extraction_time_ms INTEGER,
+    normalization_time_ms INTEGER,
+    archive_time_ms INTEGER,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (doc_sha256) REFERENCES documents(sha256)
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
 CREATE INDEX IF NOT EXISTS idx_proposals_doc_a ON proposals(doc_a_sha256);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_sha256);
+CREATE INDEX IF NOT EXISTS idx_metrics_doc ON ingestion_metrics(doc_sha256);
 """
 
 MIGRATIONS: list[str] = []
@@ -440,6 +469,47 @@ class Database:
         assert self._conn is not None
         await self._conn.commit()
 
+    async def insert_metric(self, metric: IngestionMetric) -> None:
+        """Insert ingestion timing metric."""
+        created_at = metric.created_at or datetime.utcnow()
+        await self._exec(
+            """INSERT INTO ingestion_metrics
+            (doc_sha256, doc_type, source, total_time_ms, extraction_time_ms, normalization_time_ms, archive_time_ms, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                metric.doc_sha256,
+                metric.doc_type,
+                metric.source,
+                metric.total_time_ms,
+                metric.extraction_time_ms,
+                metric.normalization_time_ms,
+                metric.archive_time_ms,
+                created_at.isoformat(),
+            ),
+        )
+        assert self._conn is not None
+        await self._conn.commit()
+
+    async def get_metrics(self) -> list[IngestionMetric]:
+        """Get all ingestion metrics."""
+        rows = await self._fetch_all(
+            "SELECT * FROM ingestion_metrics ORDER BY created_at DESC"
+        )
+        return [self._row_to_metric(row) for row in rows]
+
+    def _row_to_metric(self, row: aiosqlite.Row) -> IngestionMetric:
+        """Convert a database row to IngestionMetric."""
+        return IngestionMetric(
+            doc_sha256=row["doc_sha256"],
+            doc_type=row["doc_type"],
+            source=row["source"],
+            total_time_ms=row["total_time_ms"],
+            extraction_time_ms=row["extraction_time_ms"],
+            normalization_time_ms=row["normalization_time_ms"],
+            archive_time_ms=row["archive_time_ms"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
 
 _db_instance: Database | None = None
 
@@ -462,3 +532,25 @@ async def close_database() -> None:
     if _db_instance:
         await _db_instance.close()
         _db_instance = None
+
+
+@asynccontextmanager
+async def db_context() -> AsyncGenerator[Database, None]:
+    """Context manager for database - handles connect/close lifecycle.
+
+    Usage:
+        async with db_context() as db:
+            await db.insert_document(doc)
+            await db.insert_metric(metric)
+        # Connection automatically closed
+    """
+    config = get_config()
+    if config.db_path is None:
+        raise RuntimeError("Database path not configured")
+
+    db = Database(config.db_path)
+    await db.connect()
+    try:
+        yield db
+    finally:
+        await db.close()
