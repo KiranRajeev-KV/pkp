@@ -255,6 +255,7 @@ async def _do_ingest_url(url: str, show_profile: bool = False) -> dict | None:
     )
     archive.write_metadata(extracted.sha256, metadata)
 
+    config = get_config()
     async with db_context() as db:
         doc = Document(
             sha256=extracted.sha256,
@@ -265,6 +266,7 @@ async def _do_ingest_url(url: str, show_profile: bool = False) -> dict | None:
             word_count=chunked.word_count,
             archive_path=str(doc_dir),
             tags=[],
+            embedded_with=config.embedding_model,
         )
         await db.insert_document(doc)
 
@@ -537,6 +539,7 @@ async def _do_ingest_pdf(pdf_path: Path, show_profile: bool = False) -> dict | N
     )
     archive.write_metadata(extracted.sha256, metadata)
 
+    config = get_config()
     async with db_context() as db:
         doc = Document(
             sha256=extracted.sha256,
@@ -547,6 +550,7 @@ async def _do_ingest_pdf(pdf_path: Path, show_profile: bool = False) -> dict | N
             word_count=chunked.word_count,
             archive_path=str(doc_dir),
             tags=[],
+            embedded_with=config.embedding_model,
         )
         await db.insert_document(doc)
 

@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS documents (
     word_count INTEGER,
     archive_path TEXT NOT NULL,
     vault_path TEXT,
-    tags TEXT
+    tags TEXT,
+    embedded_with TEXT NOT NULL
 );
 
 -- Chunk registry (for provenance, not for content storage)
@@ -186,22 +187,24 @@ class Database:
 
     async def insert_document(self, doc: Document) -> None:
         """Insert a new document."""
+        params = (
+            doc.sha256,
+            doc.url,
+            doc.title,
+            doc.doc_type,
+            doc.retrieved_at.isoformat(),
+            doc.indexed_at.isoformat() if doc.indexed_at else None,
+            doc.word_count,
+            doc.archive_path,
+            doc.vault_path,
+            json.dumps(doc.tags),
+            doc.embedded_with,
+        )
         await self._exec(
             """INSERT OR REPLACE INTO documents
-            (sha256, url, title, doc_type, retrieved_at, indexed_at, word_count, archive_path, vault_path, tags)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                doc.sha256,
-                doc.url,
-                doc.title,
-                doc.doc_type,
-                doc.retrieved_at.isoformat(),
-                doc.indexed_at.isoformat() if doc.indexed_at else None,
-                doc.word_count,
-                doc.archive_path,
-                doc.vault_path,
-                json.dumps(doc.tags),
-            ),
+            (sha256, url, title, doc_type, retrieved_at, indexed_at, word_count, archive_path, vault_path, tags, embedded_with)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            params,
         )
         assert self._conn is not None
         await self._conn.commit()
@@ -224,6 +227,7 @@ class Database:
             archive_path=row["archive_path"],
             vault_path=row["vault_path"],
             tags=tags,
+            embedded_with=row["embedded_with"] if row["embedded_with"] else "",
         )
 
     async def get_jobs_by_status(self, status: str, limit: int = 1) -> list[Job]:

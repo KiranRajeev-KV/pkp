@@ -20,6 +20,7 @@ class Document:
     word_count: int | None = None
     vault_path: str | None = None
     tags: list[str] = field(default_factory=list)
+    embedded_with: str = ""
 
 
 @dataclass
