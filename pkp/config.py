@@ -7,6 +7,14 @@ from pathlib import Path
 from typing import Any
 
 import toml
+from dotenv import load_dotenv
+
+
+def _load_env_file(data_dir: Path) -> None:
+    """Load .env file from data directory."""
+    env_path = data_dir / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
 
 
 @dataclass
@@ -107,6 +115,9 @@ def load_config(config_path: Path | None = None) -> PKPConfig:
     """Load configuration from file or return defaults."""
     if config_path is None:
         config_path = Path.home() / ".pkp" / "config.toml"
+
+    env_data_dir = config_path.parent
+    _load_env_file(env_data_dir)
 
     if not config_path.exists():
         config = PKPConfig()

@@ -7,7 +7,7 @@
 
 Before any design decisions, these constraints shape everything:
 
-1. **Local-first**: No data leaves the machine without explicit opt-in. No required cloud services.
+1. **Local-first by default**: Compute and source storage stay on-machine. Turso is the accepted cloud dependency for metadata (by design, for future plans). All other services must be local or explicitly opt-in.
 2. **Source preservation is immutable**: Original documents are never modified or deleted by the system.
 3. **Markdown vault is the durable truth**: The Obsidian vault is written to *only* after human approval.
 4. **Retrieval index is a rebuildable cache**: If the index is deleted, a single command rebuilds it from stored sources.
@@ -29,8 +29,8 @@ A working MVP has exactly one job: **ingestion → retrieval → proposal → re
 - URL ingestion: paste a URL, get a normalized document
 - PDF ingestion: drop a file, get a normalized document
 - Source archive: original is stored, immutably
-- Chunking, embedding, BM25 indexing of extracted text
-- Basic hybrid retrieval (BM25 + vector)
+- Chunking, embedding, and indexing of extracted text (BGE-M3 dense + sparse vectors)
+- Hybrid retrieval via Qdrant native RRF (sparse + dense, no separate BM25 index needed)
 - Connection proposals: when a new document is ingested, retrieve the top-N most related existing documents and propose connections with a one-sentence rationale
 - Review queue: a simple local web UI showing pending proposals; approve/reject/edit
 - On approval: a Markdown file with YAML frontmatter, wiki-links to approved connections, and source attribution is written to the Obsidian vault
@@ -52,7 +52,7 @@ A working MVP has exactly one job: **ingestion → retrieval → proposal → re
 - Knowledge graphs. Do not build a graph in MVP. Vector + BM25 + reranking handles 90% of the connection discovery value at 5% of the complexity.
 - A beautiful frontend. The review queue can be a plain HTML table. Ship the pipeline, not the UI.
 - Custom embedding models. Use an off-the-shelf model. The gain from fine-tuning is marginal against the cost of doing it.
-- An event streaming system. SQLite is your job queue. You are one person, processing dozens of documents per day, not millions per second.
+- An event streaming system. Turso is your job queue. You are one person, processing dozens of documents per day, not millions per second.
 - Semantic chunking. Start with fixed-size + overlap. It works. Optimize later with evidence.
 
 **Phase 2 (after MVP is stable and used daily):**
@@ -92,7 +92,7 @@ A working MVP has exactly one job: **ingestion → retrieval → proposal → re
                    │
 ┌──────────────────▼───────────────────────────────────────────┐
 │                    Pipeline Orchestrator                      │
-│  JobQueue (SQLite)  ·  Worker pool (async Python tasks)      │
+│  JobQueue (Turso)  ·  Worker pool (async Python tasks)       │
 └────┬─────────────┬──────────────┬───────────────┬───────────┘
      │             │              │               │
 ┌────▼────┐  ┌────▼────┐  ┌─────▼─────┐  ┌─────▼──────┐
@@ -104,9 +104,10 @@ A working MVP has exactly one job: **ingestion → retrieval → proposal → re
 ┌────▼────────────▼─────────────▼───────────────▼───────────┐
 │                       Storage Layer                         │
 │                                                             │
-│  /archive/        /vault/           metadata.db  index/    │
-│  (immutable       (Obsidian,        (SQLite)     (LanceDB) │
-│   originals)       human-gated)                            │
+│  /archive/        /vault/           Turso (libSQL)  Qdrant │
+│  (immutable       (Obsidian,        (metadata,      (BGE-M3 │
+│   originals)       human-gated)     jobs, proposals) dense+ │
+│                                                     sparse) │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -116,10 +117,14 @@ A working MVP has exactly one job: **ingestion → retrieval → proposal → re
 User submits URL
         │
         ▼
-[1] Job created in SQLite jobs table (status=pending)
+[1] Job created in Turso jobs table (status=pending)
         │
         ▼
-[2] Extractor pulls content (Jina Reader for web, Docling for PDF)
+[2] Extractor pulls content
+    Primary:  Crawl4AI (JS rendering, returns fit_markdown + raw_markdown)
+    Fallback: Trafilatura run on Crawl4AI's already-fetched HTML (no second request)
+              triggered if fit_markdown word count < 150
+    PDF:      Docling
     → Saves original HTML/PDF to /archive/{sha256}/original.*
     → Saves extracted Markdown to /archive/{sha256}/extracted.md
     → Saves metadata JSON to /archive/{sha256}/meta.json
@@ -130,16 +135,15 @@ User submits URL
     → Saves chunks to /archive/{sha256}/chunks.jsonl
         │
         ▼
-[4] Embedder embeds each chunk
-    → Upserts into LanceDB (vector index)
-    → Upserts into SQLite FTS5 (BM25 index)
-    → Records document metadata in SQLite documents table
+[4] Embedder runs BGE-M3 on each chunk (produces dense + sparse vectors in one pass)
+    → Upserts dense + sparse vectors into Qdrant
+    → Records document metadata in Turso documents table
         │
         ▼
-[5] Proposal Engine runs hybrid retrieval
+[5] Proposal Engine runs hybrid retrieval via Qdrant native RRF
     Retrieves top-10 candidate documents
     Generates one-sentence rationale per candidate (via LLM or template)
-    → Saves proposals to SQLite proposals table (status=pending)
+    → Saves proposals to Turso proposals table (status=pending)
         │
         ▼
 [6] User opens review queue UI
@@ -148,7 +152,7 @@ User submits URL
     Rejects: proposal marked rejected, never touched again
         │
         ▼
-[7] Job marked complete
+[7] Job marked complete in Turso
 ```
 
 ---
@@ -179,13 +183,14 @@ NormalizerService
 IndexerService
   Input:  NormalizedDocument
   Output: None (side effects only)
-  Side effects: Upserts to LanceDB and SQLite FTS5.
+  Side effects: Upserts BGE-M3 dense + sparse vectors to Qdrant.
+                Records document metadata in Turso.
   Contract: Idempotent. Re-running on same sha256 is safe.
 
 ProposalEngine
-  Input:  NormalizedDocument + IndexerService (read-only)
+  Input:  NormalizedDocument + Qdrant (read-only)
   Output: List[ConnectionProposal] { doc_a, doc_b, rationale, score }
-  Side effects: Writes to proposals table.
+  Side effects: Writes to Turso proposals table.
   Contract: Never touches /vault. Never touches source documents.
 
 VaultWriter
@@ -220,13 +225,27 @@ ReviewQueueAPI
 │       ├── normalized.md    # Post-normalization Markdown
 │       ├── chunks.jsonl     # One chunk per line with offsets
 │       └── meta.json        # URL, retrieval date, doc type, title, etc.
-├── db/
-│   └── metadata.db          # Single SQLite file (documents, chunks, proposals, jobs)
-└── index/
-    └── vectors.lance/       # LanceDB index (rebuildable from chunks.jsonl)
+└── db/
+    └── turso.db             # libSQL embedded replica (syncs to Turso remote)
+                             # Contains: documents, chunks, proposals, jobs
+# Qdrant runs as a separate local process (Docker or binary)
+# Data stored in Qdrant's own data directory (~/.pkp/qdrant/ if local binary)
 ```
 
-### SQLite Schema
+### Turso (libSQL) Schema
+
+Turso uses the libSQL embedded replica mode: reads are local (no network hop), writes sync to the remote Turso database. Connect at startup with `conn.sync()` to pull the latest state.
+
+```python
+import libsql_experimental as libsql
+
+conn = libsql.connect(
+    database="turso.db",          # local replica file
+    sync_url="libsql://your-db.turso.io",
+    auth_token=os.environ["TURSO_TOKEN"],
+)
+conn.sync()  # pull latest from remote on startup
+```
 
 ```sql
 -- Core document registry
@@ -235,15 +254,16 @@ CREATE TABLE documents (
     url          TEXT,
     title        TEXT,
     doc_type     TEXT,  -- 'article', 'paper', 'documentation', 'pdf'
-    retrieved_at TIMESTAMP NOT NULL,
-    indexed_at   TIMESTAMP,
+    retrieved_at TEXT NOT NULL,
+    indexed_at   TEXT,
     word_count   INTEGER,
     archive_path TEXT NOT NULL,
     vault_path   TEXT,  -- NULL until written to vault
-    tags         TEXT   -- JSON array
+    tags         TEXT,  -- JSON array
+    embedded_with TEXT  -- model name used for embedding, e.g. 'BAAI/bge-m3'
 );
 
--- Chunk registry (for provenance, not for content storage)
+-- Chunk registry (provenance only — content lives in Qdrant)
 CREATE TABLE chunks (
     chunk_id     TEXT PRIMARY KEY,  -- sha256 + ':' + chunk_index
     doc_sha256   TEXT NOT NULL REFERENCES documents(sha256),
@@ -253,25 +273,26 @@ CREATE TABLE chunks (
     token_count  INTEGER
 );
 
--- BM25 full-text index over chunk content
-CREATE VIRTUAL TABLE chunks_fts USING fts5(
-    chunk_id UNINDEXED,
-    doc_sha256 UNINDEXED,
-    content,
-    tokenize = 'porter unicode61'
-);
-
--- Connection proposals
+-- Connection proposals (the human review queue)
 CREATE TABLE proposals (
     proposal_id   TEXT PRIMARY KEY,
     doc_a_sha256  TEXT NOT NULL REFERENCES documents(sha256),
     doc_b_sha256  TEXT NOT NULL REFERENCES documents(sha256),
-    score         REAL NOT NULL,        -- composite retrieval score
-    rationale     TEXT,                 -- LLM-generated or template-generated
+    score         REAL NOT NULL,
+    rationale     TEXT,
     status        TEXT NOT NULL DEFAULT 'pending',  -- pending|approved|rejected
-    created_at    TIMESTAMP NOT NULL,
-    reviewed_at   TIMESTAMP,
-    link_type     TEXT   -- 'related'|'contradicts'|'extends'|'prerequisite' — LLM-assigned, human-editable
+    created_at    TEXT NOT NULL,
+    reviewed_at   TEXT,
+    link_type     TEXT,   -- 'related'|'contradicts'|'extends'|'prerequisite'
+    human_edited  INTEGER DEFAULT 0  -- 1 if user modified the rationale
+);
+
+-- Rejected pairs (never repropose these)
+CREATE TABLE rejected_pairs (
+    doc_a_sha256  TEXT NOT NULL,
+    doc_b_sha256  TEXT NOT NULL,
+    rejected_at   TEXT NOT NULL,
+    PRIMARY KEY (doc_a_sha256, doc_b_sha256)
 );
 
 -- Job queue
@@ -280,46 +301,90 @@ CREATE TABLE jobs (
     job_type     TEXT NOT NULL,   -- 'ingest_url'|'ingest_pdf'|'rebuild_index'
     payload      TEXT NOT NULL,   -- JSON
     status       TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed
-    created_at   TIMESTAMP NOT NULL,
-    started_at   TIMESTAMP,
-    completed_at TIMESTAMP,
+    created_at   TEXT NOT NULL,
+    started_at   TEXT,
+    completed_at TEXT,
     error        TEXT
 );
 
--- Indexes that matter
 CREATE INDEX idx_proposals_status ON proposals(status);
-CREATE INDEX idx_proposals_doc_a ON proposals(doc_a_sha256);
-CREATE INDEX idx_jobs_status ON jobs(status, created_at);
+CREATE INDEX idx_proposals_doc_a  ON proposals(doc_a_sha256);
+CREATE INDEX idx_jobs_status      ON jobs(status, created_at);
 ```
 
-### LanceDB Schema
+**Note on FTS5**: libSQL's FTS5 support is incomplete. Do not build a BM25 index in Turso. Lexical search is handled by Qdrant's sparse vectors (BGE-M3), which replaces FTS5 entirely.
+
+### Qdrant Collection Setup
+
+BGE-M3 produces dense (1024-dim) and sparse vectors in a single inference pass. Both go into one Qdrant collection with named vector slots. Set this up once — changing vector config later requires recreating the collection.
 
 ```python
-# LanceDB table: 'chunks'
-schema = pa.schema([
-    pa.field("chunk_id",   pa.string()),     # sha256:chunk_index
-    pa.field("doc_sha256", pa.string()),
-    pa.field("doc_type",   pa.string()),
-    pa.field("title",      pa.string()),
-    pa.field("url",        pa.string()),
-    pa.field("retrieved_at", pa.string()),
-    pa.field("content",    pa.string()),     # chunk text (for display)
-    pa.field("vector",     pa.list_(pa.float32(), 768)),  # embedding dim
-])
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    VectorParams, SparseVectorParams, Distance
+)
+
+client = QdrantClient(url="http://localhost:6333")
+
+client.create_collection(
+    collection_name="chunks",
+    vectors_config={
+        "dense": VectorParams(
+            size=1024,           # BGE-M3 dense output — do not change after init
+            distance=Distance.COSINE,
+        )
+    },
+    sparse_vectors_config={
+        "sparse": SparseVectorParams()  # BGE-M3 sparse/lexical output
+    }
+)
+```
+
+Each Qdrant point stores the chunk content and metadata as payload (for display in proposals and for metadata filtering):
+
+```python
+from qdrant_client.models import PointStruct, SparseVector
+
+client.upsert(
+    collection_name="chunks",
+    points=[
+        PointStruct(
+            id=chunk_uuid,        # deterministic UUID from chunk_id string
+            vector={
+                "dense": dense_vector,           # List[float], len=1024
+                "sparse": SparseVector(
+                    indices=sparse_indices,       # from BGE-M3 sparse output
+                    values=sparse_values,
+                )
+            },
+            payload={
+                "chunk_id":    chunk_id,          # sha256:chunk_index
+                "doc_sha256":  doc_sha256,
+                "doc_type":    doc_type,
+                "title":       title,
+                "url":         url,
+                "retrieved_at": retrieved_at,
+                "content":     chunk_text,        # for display in review UI
+            }
+        )
+    ]
+)
 ```
 
 ### Why This Schema
 
-- `documents` is the registry. Every query that needs document-level metadata goes here.
-- `chunks` in SQLite records provenance (offsets) only. Chunk content lives in LanceDB for vector ops and in `chunks_fts` for BM25. Don't store content in three places — store it in two (LanceDB for semantic, FTS5 for lexical).
+- `documents` in Turso is the registry. Every query needing document-level metadata goes here. The `embedded_with` field is critical — if the model changes, `rebuild-index` detects the mismatch and re-embeds everything. Mixing BGE-M3 embeddings with another model's embeddings in the same Qdrant collection produces garbage retrieval.
+- `chunks` in Turso records provenance (offsets) only. Chunk content lives in Qdrant payload. No content duplication.
 - `proposals` is the human review queue. Status transitions are the only mutations. Approved proposals drive VaultWriter.
-- `jobs` is the async work queue. No Redis. No RabbitMQ. SQLite with a polling worker is entirely sufficient for a single-user local tool.
+- `rejected_pairs` prevents the system from reproposing connections the user already rejected.
+- `jobs` is the async work queue. Turso with a polling worker is entirely sufficient for a single-user tool. Turso's embedded replica means the poll reads locally — no network round-trip per poll cycle.
+- Qdrant sparse vectors replace FTS5/BM25 entirely. BGE-M3's sparse output is a learned sparse representation (similar to SPLADE) that outperforms BM25 on semantic recall while preserving lexical precision. One index, one query path.
 
 ### What NOT to Build in Storage
 
 - **Do not build a graph store.** No Neo4j, no networkx persistence, nothing. If Phase 3 needs a graph, derive it from the proposals table (every approved proposal is an edge) at query time. The proposals table is already a graph.
-- **Do not normalize chunk content into a separate content table.** Keep content co-located with the vector in LanceDB. Chasing joins at retrieval time kills latency.
-- **Do not build a separate search history or analytics layer in MVP.** Log to a plain text file or append to SQLite if you need it. Don't build an analytics schema before you know what you need to measure.
+- **Do not build a BM25/FTS index.** Qdrant sparse vectors from BGE-M3 handle lexical search. Adding a separate FTS layer duplicates functionality and adds maintenance surface.
+- **Do not build a separate search history or analytics layer in MVP.** Log to a plain file if you need it. Don't build an analytics schema before you know what you need to measure.
 
 ---
 
@@ -327,46 +392,49 @@ schema = pa.schema([
 
 ### The Hybrid Stack
 
-```
-Query
-  │
-  ├──▶ BM25 (SQLite FTS5)  ──────┐
-  │    SELECT chunk_id, bm25()    │
-  │    FROM chunks_fts            │
-  │    WHERE content MATCH ?      │
-  │    ORDER BY rank LIMIT 50     │
-  │                               ├──▶ Reciprocal Rank Fusion
-  └──▶ Dense (LanceDB)  ─────────┘         │
-       table.search(query_vector)           │
-             .limit(50)                     ▼
-             .select(["chunk_id",    Top-20 candidates
-                       "content"])         │
-                                           │  (Phase 2)
-                                           ▼
-                                    Cross-encoder reranker
-                                    (local, ms-marco-MiniLM)
-                                           │
-                                           ▼
-                                    Top-10 final candidates
-```
+BGE-M3 produces both dense and sparse vectors in one inference pass. Qdrant handles hybrid fusion natively — no custom RRF implementation required.
 
-### Reciprocal Rank Fusion (RRF)
+```
+Query text → BGE-M3 → dense vector (1024d) + sparse vector
+                              │                    │
+                              ▼                    ▼
+                    Qdrant dense search   Qdrant sparse search
+                    (cosine, limit=50)    (limit=50)
+                              │                    │
+                              └──────────┬─────────┘
+                                         ▼
+                              Qdrant native RRF fusion
+                                         │
+                                         ▼
+                                  Top-20 candidates
+                                         │
+                                   (Phase 2 only)
+                                         ▼
+                              BGE-reranker-v2-m3 (local)
+                                         │
+                                         ▼
+                                  Top-10 final candidates
+```
 
 ```python
-def rrf_merge(bm25_results, vector_results, k=60):
-    """
-    k=60 is standard. Higher k = less weight to top ranks.
-    Returns dict of chunk_id -> rrf_score.
-    """
-    scores = defaultdict(float)
-    for rank, (chunk_id, _) in enumerate(bm25_results):
-        scores[chunk_id] += 1.0 / (k + rank + 1)
-    for rank, (chunk_id, _) in enumerate(vector_results):
-        scores[chunk_id] += 1.0 / (k + rank + 1)
-    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+from qdrant_client.models import Prefetch, FusionQuery, Fusion
+
+# Embed the query with BGE-M3
+dense_vec, sparse_vec = embed_bge_m3(query_text)
+
+results = client.query_points(
+    collection_name="chunks",
+    prefetch=[
+        Prefetch(query=sparse_vec, using="sparse", limit=50),
+        Prefetch(query=dense_vec,  using="dense",  limit=50),
+    ],
+    query=FusionQuery(fusion=Fusion.RRF),
+    limit=20,
+    with_payload=True,   # returns chunk content for display
+)
 ```
 
-RRF does not require score normalization between BM25 and vector similarity, which makes it robust and simple. It is the correct default fusion strategy. Do not invent a weighted linear combination — RRF is consistently competitive and requires no tuning.
+Qdrant's RRF implementation is equivalent to the manual implementation in the original design. No custom fusion code needed.
 
 ### Retrieval at Ingestion Time (Proposal Engine Input)
 
@@ -379,14 +447,26 @@ Start with approach 1 (title + first paragraph). Move to approach 2 if proposal 
 
 ### Metadata Filtering
 
-Retrieval should support filtering before vector search. LanceDB supports predicate pushdown on schema fields. SQLite FTS5 supports WHERE clauses alongside MATCH.
+Qdrant supports payload filtering combined with vector search in a single query. Filter before or alongside the vector search — no separate query needed.
 
-Useful filters for PKM:
-- `doc_type = 'paper'` (restrict to academic sources)
-- `retrieved_at >= '2024-01-01'` (only recent saves)
-- `tags LIKE '%ml%'` (approximate tag match; upgrade to JSON array query with SQLite JSON functions)
+```python
+from qdrant_client.models import Filter, FieldCondition, MatchValue, Range
 
-Do not build a tag management UI in MVP. Let users set tags in `meta.json` manually or via CLI. Build the filter capability; defer the UI.
+results = client.query_points(
+    collection_name="chunks",
+    prefetch=[
+        Prefetch(query=sparse_vec, using="sparse", limit=50),
+        Prefetch(query=dense_vec,  using="dense",  limit=50),
+    ],
+    query=FusionQuery(fusion=Fusion.RRF),
+    query_filter=Filter(must=[
+        FieldCondition(key="doc_type", match=MatchValue(value="paper")),
+    ]),
+    limit=20,
+)
+```
+
+Useful filters for PKM: `doc_type` (restrict to papers, articles, docs), `retrieved_at` range (only recent saves), tag matching via payload field. Tag filtering requires storing tags as a list field in Qdrant payload and using `MatchAny`.
 
 ### Index Rebuild
 
@@ -395,15 +475,15 @@ pkp index rebuild
 ```
 
 This command:
-1. Drops the LanceDB table
-2. Drops and recreates `chunks_fts`
-3. Iterates over every `sha256` directory in `/archive`
-4. Re-chunks and re-embeds from `normalized.md`
-5. Re-upserts to LanceDB and FTS5
+1. Deletes and recreates the Qdrant `chunks` collection
+2. Iterates over every `sha256` directory in `/archive`
+3. Re-chunks and re-embeds from `normalized.md` using BGE-M3
+4. Re-upserts dense + sparse vectors to Qdrant
+5. Updates `indexed_at` and `embedded_with` in Turso
 
-The rebuild must be idempotent and interruptible. Store progress in SQLite (`rebuild_jobs` row). Allow resume from last successful `sha256`.
+The rebuild must be idempotent and interruptible. Store progress as a `rebuild_index` job row in Turso. Allow resume from last successful `sha256` by checking which documents already exist in the Qdrant collection before upserting.
 
-**Target rebuild performance**: For a personal vault of 5,000 documents with local embeddings, rebuild should complete in under 30 minutes on consumer hardware with an RTX 4050. Batch embedding calls — send 32–64 chunks per model call, not one at a time.
+**Target rebuild performance**: For a personal vault of 5,000 documents, rebuild should complete in under 30 minutes on an RTX 4050. Batch embedding calls — send 32–64 chunks per BGE-M3 inference call, not one at a time.
 
 ---
 
@@ -663,9 +743,10 @@ This requires building an Obsidian plugin (TypeScript), which is a separate code
 
 | Scenario | Prevention |
 |---|---|
-| Embedding model changed | Store model name + version in `documents.indexed_with`. On rebuild, detect mismatch and warn. |
-| Partial index failure during ingestion | Log failed chunk IDs. `rebuild` command re-indexes only failed chunks if given `--repair` flag. |
-| LanceDB corruption | LanceDB is a cache. Drop and rebuild. Source is the archive. |
+| Embedding model changed | Store `embedded_with` on every document row in Turso. On rebuild, detect mismatch and re-embed everything. |
+| Partial index failure during ingestion | Log failed chunk IDs in Turso. `rebuild` command re-indexes only failed chunks if given `--repair` flag. |
+| Qdrant collection corruption | Qdrant is a cache. Delete collection and rebuild from `chunks.jsonl` in the archive. Source is always the archive. |
+| Turso sync failure | Embedded replica has local state. On reconnect, libSQL syncs automatically. Jobs in-flight are re-tried via status check on startup. |
 
 **Class D: Trust boundary violations** — The system behaves in ways that undermine user trust.
 
@@ -725,21 +806,21 @@ This means evaluation is partly qualitative and partly behavioral.
 **Smoke tests you can run continuously:**
 
 ```python
-# Test 1: BM25 finds exact-match content
+# Test 1: Sparse retrieval finds exact-match content
 # Ingest a document with a unique rare phrase
-# Query for that phrase → must be in top-3
+# Query for that phrase via Qdrant sparse → must be in top-3
 
-# Test 2: Vector retrieval finds paraphrases
+# Test 2: Dense retrieval finds paraphrases
 # Ingest "Attention mechanisms compute weighted sums over values"
 # Query "how transformers weight their inputs" → must retrieve the document
 
 # Test 3: Hybrid beats either alone on ambiguous queries
-# Construct a set of query pairs where BM25 fails (needs semantics)
-# and where vector fails (needs exact terms) → hybrid should win both
+# Construct query pairs where sparse fails (needs semantics)
+# and where dense fails (needs exact terms) → hybrid RRF should win both
 
 # Test 4: Index rebuild is idempotent
 # Index N documents, record top-5 results for K queries
-# Rebuild index, re-run same queries → results must be identical
+# Rebuild Qdrant collection, re-run same queries → results must be identical
 ```
 
 ### Tier 2: Proposal Quality Audit (Manual, Periodic)
@@ -799,11 +880,28 @@ This is not a substitute for real-world use, but it gives you a regression test 
 
 | Option | Pros | Cons |
 |---|---|---|
-| Jina Reader (`r.jina.ai/URL`) | Zero setup, returns clean Markdown, handles many JS-heavy sites, free tier | External HTTP call (not local-first by default), rate limited, paywall failure is silent |
-| Trafilatura (local Python library) | Fully local, fast, good at article extraction, handles boilerplate removal | Fails on heavy JS-rendered pages without Playwright |
-| Playwright + Trafilatura | Handles JS rendering, fully local | Requires Chromium binary, slow (2–5s per page), overkill for most articles |
+| Crawl4AI (primary) | Local, JS rendering via Playwright, returns `fit_markdown` + `raw_markdown`, BM25 content filtering built-in, 50k+ GitHub stars, self-hostable via Docker | Requires Chromium binary, heavier than pure-HTTP tools |
+| Trafilatura (fallback) | Fully local, fast, best mean extraction quality on static HTML, no second network request when fed Crawl4AI's HTML | Fails on JS-rendered pages without a browser |
+| Jina Reader (`r.jina.ai`) | Zero setup, handles many sites, free tier | External API, 7.9s avg latency, sends content to Jina servers |
 
-**Recommendation**: Trafilatura as primary, Playwright as fallback for known-failed extractions. Jina Reader as a user-configurable option (for those who accept the external dependency). Do not use Jina Reader as the default — it violates local-first.
+**Recommendation**: **Crawl4AI as primary, Trafilatura as fallback on the same fetched HTML.** Trigger the fallback when Crawl4AI's `fit_markdown` word count is below 150 — pass Crawl4AI's already-fetched `result.html` directly to Trafilatura, no second network request. Use Jina Reader only as a last-resort cloud fallback for edge cases.
+
+```python
+result = await crawl4ai_crawler.arun(url=url, config=crawl_config)
+
+if word_count(result.markdown.fit_markdown) < 150:
+    # Re-process the HTML Crawl4AI already fetched — no second request
+    fallback_text = trafilatura.extract(result.html, include_comments=False)
+    if fallback_text and word_count(fallback_text) > word_count(result.markdown.fit_markdown):
+        extracted = fallback_text
+    else:
+        flag_as_extraction_failure(url)  # queue for manual review
+else:
+    extracted = result.markdown.fit_markdown  # use fit_markdown for clean output
+    raw = result.markdown.raw_markdown        # store raw_markdown in archive for reprocessing
+```
+
+Use `fit_markdown` for LLM calls (lower token cost). Store `raw_markdown` in the archive alongside `normalized.md` for reprocessing if heuristics improve.
 
 **For PDFs:**
 
@@ -831,13 +929,12 @@ This is not a substitute for real-world use, but it gives you a regression test 
 
 | Option | Pros | Cons |
 |---|---|---|
-| LanceDB | Embedded (no server), local files, Python native, supports filtering, ANN indexing | Younger project, less battle-tested at scale, single-writer |
-| Chroma | Simple API, embedded mode available | Less mature metadata filtering, performance issues at scale |
-| Qdrant | Production-grade, excellent filtering, named vectors, good docs | Requires separate process/server, overkill for single user |
-| pgvector (PostgreSQL extension) | Reuses existing Postgres knowledge, SQL queries | Requires PostgreSQL, not local-first without Docker |
-| SQLite-vec | Fully embedded in SQLite, one dependency | Very early stage, limited ANN support |
+| Qdrant | Production-grade, named vectors, native sparse vector support, native RRF hybrid fusion, excellent payload filtering, good Python client | Requires separate process (Docker or local binary) |
+| LanceDB | Embedded (no server), local files, Python native | Sparse vector support less ergonomic, no native RRF |
+| Chroma | Simple API, embedded mode available | No native sparse vector support, performance issues at scale |
+| pgvector (PostgreSQL extension) | SQL-native, good for existing Postgres users | No native sparse vectors, requires PostgreSQL |
 
-**Recommendation**: **LanceDB**. For a local-first, single-user tool, embedded operation is non-negotiable. LanceDB's performance is sufficient for personal vault scale (up to ~100K chunks comfortably). Its Python native API integrates cleanly. Qdrant would be the right choice if this becomes a multi-user or server-hosted tool.
+**Recommendation**: **Qdrant**. The deciding factor is BGE-M3 sparse vector support — Qdrant's named vector architecture handles dense + sparse in one collection with native RRF fusion. This eliminates the need for a separate BM25/FTS index entirely. Run Qdrant as a local binary or Docker container with data stored in `~/.pkp/qdrant/`. The infrastructure cost (one extra process) is justified by the retrieval architecture it enables.
 
 ---
 
@@ -845,11 +942,11 @@ This is not a substitute for real-world use, but it gives you a regression test 
 
 | Option | Pros | Cons |
 |---|---|---|
-| SQLite | Zero setup, embedded, FTS5 for BM25, JSON functions, ACID, widely understood | Single-writer (fine for this use case), not suitable for concurrent multi-user |
-| PostgreSQL | Production-grade, concurrent, full-featured | Requires server process, overkill for local single-user |
-| DuckDB | Excellent for analytical queries, fast aggregations, file-based | Less mature for OLTP, FTS support is limited |
+| Turso (libSQL) | SQLite-compatible API, embedded replica mode (local reads, remote writes), edge replication for future plans, remote access across devices | Cloud dependency, FTS5 support incomplete in libSQL |
+| SQLite | Zero setup, embedded, FTS5, ACID, widely understood | No remote access, single-device only |
+| PostgreSQL | Production-grade, concurrent, full-featured | Requires server process, overkill for single user |
 
-**Recommendation**: **SQLite with FTS5**. This gives you your metadata store, your BM25 index, and your job queue in one file with zero infrastructure. The single-writer limitation is not a problem for a local personal tool. Do not introduce PostgreSQL — it adds a service dependency with no benefit for this use case.
+**Recommendation**: **Turso with embedded replica mode**. Use `libsql_experimental` in Python. The embedded replica gives local read latency on the hot path (job queue polling, metadata lookups) while syncing writes to the remote. This preserves local-first behavior for reads while enabling future multi-device or server-hosted use cases. Do not use Turso's FTS5 — lexical search is handled by Qdrant sparse vectors instead.
 
 ---
 
@@ -857,20 +954,23 @@ This is not a substitute for real-world use, but it gives you a regression test 
 
 | Option | Pros | Cons |
 |---|---|---|
-| SQLite jobs table (polling) | Zero additional infrastructure, survives restarts, simple to understand | Polling overhead (negligible at this scale), not suitable for high throughput |
-| Redis + arq/rq | Well-understood, good for concurrent workers | Requires Redis server, violates local-first simplicity |
+| Turso jobs table (polling) | Zero additional infrastructure, survives restarts, local replica means reads are fast, consistent with rest of metadata layer | Polling overhead (negligible at this scale) |
+| Redis + arq/rq | Well-understood, good for concurrent workers | Requires Redis server, additional infrastructure |
 | Celery + broker | Production-grade, feature-rich | Massive complexity overhead for this use case |
 | asyncio queue (in-memory) | Zero overhead | Lost on process restart |
-| Python-multiprocessing Queue | Works without infrastructure | Lost on process restart |
 
-**Recommendation**: **SQLite jobs table with a polling worker**. Poll interval: 1 second. This is entirely sufficient for a personal tool where ingestion throughput is at most a few documents per minute. Survives restarts. No additional infrastructure. Any engineer telling you this needs Kafka is wrong.
-
-Implementation sketch:
+**Recommendation**: **Turso jobs table with a polling worker**. Poll interval: 1 second. The embedded replica means each poll reads from the local file — no network round-trip per cycle. Entirely sufficient for a personal tool where ingestion throughput is at most a few documents per minute. Survives restarts.
 
 ```python
-async def worker_loop(db: Database, interval_seconds: float = 1.0):
+async def worker_loop(db: TursoDB, interval_seconds: float = 1.0):
     while True:
-        job = await db.claim_next_job()  # UPDATE SET status='running' WHERE status='pending' LIMIT 1 RETURNING *
+        # Claim next job atomically
+        job = await db.execute(
+            "UPDATE jobs SET status='running', started_at=? "
+            "WHERE job_id = (SELECT job_id FROM jobs WHERE status='pending' "
+            "ORDER BY created_at LIMIT 1) RETURNING *",
+            [now()]
+        )
         if job:
             await process_job(job)
         else:
@@ -883,15 +983,38 @@ async def worker_loop(db: Database, interval_seconds: float = 1.0):
 
 | Option | Pros | Cons |
 |---|---|---|
-| nomic-embed-text (via Ollama) | Local, free, 768-dim, good quality for English, fast on GPU | English-focused, requires Ollama |
-| BGE-M3 (via sentence-transformers) | Multilingual, dense+sparse in one model, strong quality | Larger model (~2GB), slower without GPU |
-| text-embedding-3-small (OpenAI API) | Strong quality, cheap (~$0.02/million tokens), small dimension | External API call, not local-first |
-| Jina Embeddings v3 (local or API) | Multilingual, 1024-dim, supports task-type specification | API for largest model, local model is slower |
-| all-MiniLM-L6-v2 (sentence-transformers) | Tiny, fast, widely supported | Lower quality than newer models |
+| BGE-M3 (via sentence-transformers) | Dense + sparse in one pass, 1024-dim, multilingual, pairs perfectly with Qdrant named vectors, strong quality | ~570MB model, slower than smaller models without GPU |
+| nomic-embed-text (via Ollama) | Lightweight, fast, good English quality | Dense only — requires separate BM25; no sparse output |
+| text-embedding-3-small (OpenAI API) | Strong quality, cheap | External API, dense only |
+| all-MiniLM-L6-v2 | Tiny, fast | Dense only, lower quality |
 
-**Recommendation**: **nomic-embed-text via Ollama as the default, with text-embedding-3-small as an opt-in for API users**. The quality gap between nomic-embed-text and text-embedding-3-small is meaningful but not catastrophic for a personal vault. Users on an RTX 4050 (as is your case) will get fast local inference. Make the model configurable in `config.toml` — one field, model name + endpoint. This lets users upgrade without code changes.
+**Recommendation**: **BGE-M3 via sentence-transformers**. It is the only local model that produces both dense and sparse vectors in a single inference pass, which is exactly what the Qdrant hybrid architecture requires. On an RTX 4050, BGE-M3 runs comfortably fast for a personal ingestion pipeline.
 
-**Critical**: Store the model name and output dimension alongside each document's indexed metadata. If the user changes models, `rebuild-index` detects the mismatch and re-embeds everything. Mixing embeddings from different models in the same LanceDB table produces garbage retrieval results.
+```python
+from FlagEmbedding import BGEM3FlagModel
+
+model = BGEM3FlagModel('BAAI/bge-m3', use_fp16=True)
+
+def embed_chunks(texts: list[str]) -> list[dict]:
+    output = model.encode(
+        texts,
+        batch_size=32,
+        max_length=512,
+        return_dense=True,
+        return_sparse=True,
+        return_colbert_vecs=False,  # not needed for this architecture
+    )
+    return [
+        {
+            "dense": output["dense_vecs"][i].tolist(),
+            "sparse_indices": list(output["lexical_weights"][i].keys()),
+            "sparse_values":  list(output["lexical_weights"][i].values()),
+        }
+        for i in range(len(texts))
+    ]
+```
+
+**Critical**: Store `embedded_with = 'BAAI/bge-m3'` on every document row in Turso. If you ever change models, `pkp index rebuild` detects the mismatch via this field and re-embeds everything. Never mix embeddings from different models in the same Qdrant collection.
 
 ---
 
@@ -904,7 +1027,7 @@ async def worker_loop(db: Database, interval_seconds: float = 1.0):
 | Cohere Rerank API | Very high quality, easy API | External, paid |
 | mxbai-rerank-base-v1 (local) | Good quality, local | Less community testing |
 
-**Recommendation**: **BGE-reranker-v2-m3 as Phase 2 default**. Skip reranking in MVP — RRF alone is adequate for the proposal engine's top-10 use case. In Phase 2, add BGE-reranker-v2-m3. On an RTX 4050, this model runs in milliseconds per candidate set. Make it optional in config: `reranker: none | local | cohere`.
+**Recommendation**: **BGE-reranker-v2-m3 as Phase 2 default**. Skip reranking in MVP — Qdrant's native RRF is adequate for the proposal engine's top-10 use case. In Phase 2, add BGE-reranker-v2-m3. It pairs naturally with BGE-M3 (same model family, same vocabulary). On an RTX 4050 it runs in milliseconds per candidate set. Make it optional in config: `reranker: none | local | cohere`.
 
 ---
 
@@ -948,18 +1071,18 @@ pkp/
 │   │   └── search.py
 │   └── app.py
 ├── pipeline/
-│   ├── extractor.py        # Web + PDF extraction
+│   ├── extractor.py        # Crawl4AI primary + Trafilatura fallback
 │   ├── normalizer.py       # Chunking, frontmatter
-│   ├── indexer.py          # Embed + store
-│   └── proposals.py        # Proposal engine
+│   ├── indexer.py          # BGE-M3 embed + Qdrant upsert
+│   └── proposals.py        # Proposal engine (Qdrant hybrid query)
 ├── storage/
-│   ├── archive.py          # Immutable source archive
-│   ├── db.py               # SQLite access layer
-│   └── vectors.py          # LanceDB wrapper
+│   ├── archive.py          # Immutable source archive (filesystem)
+│   ├── db.py               # Turso (libSQL) access layer
+│   └── vectors.py          # Qdrant client wrapper
 ├── vault/
 │   └── writer.py           # VaultWriter (the trusted module)
 ├── llm/
-│   └── client.py           # Provider-agnostic LLM client
+│   └── client.py           # Provider-agnostic LLM client (Ollama / OpenAI)
 └── cli.py                  # Click CLI
 ```
 
@@ -992,13 +1115,13 @@ Wrap in a `uv` or `pipx`-compatible setup for cleaner isolation. Document a `uv 
 
 ## Summary: What To Build, In Order
 
-**Week 1–2**: Archive structure, SQLite schema, Docling + Trafilatura extraction, fixed-size chunking, normalized Markdown output. No embeddings yet. Just get clean documents into `~/.pkp/archive/`.
+**Week 1–2**: Archive structure, Turso schema, Crawl4AI + Trafilatura extraction, Docling for PDFs, fixed-size chunking, normalized Markdown output. No embeddings yet. Just get clean documents into `~/.pkp/archive/` with metadata in Turso.
 
-**Week 3–4**: LanceDB + FTS5 indexing, BM25 retrieval, vector retrieval, RRF fusion. CLI `pkp search "query"` that returns results. No proposals yet. Validate retrieval quality manually.
+**Week 3–4**: BGE-M3 integration, Qdrant collection setup (dense + sparse named vectors), ingestion-time embedding and upsert, Qdrant hybrid query (RRF). CLI `pkp search "query"` that returns results. No proposals yet. Validate retrieval quality manually against a test corpus.
 
-**Week 5–6**: Proposal engine with template-based rationales. SQLite proposals table. Job queue. `pkp ingest url` end-to-end without the UI.
+**Week 5–6**: Proposal engine — Qdrant hybrid query at ingestion time, template-based rationales, Turso proposals table, job queue worker. `pkp ingest url` end-to-end without the UI.
 
-**Week 7–8**: FastAPI review queue. Minimal HTML UI. VaultWriter with markers. End-to-end flow: URL → archive → index → proposals → review → vault. This is the MVP.
+**Week 7–8**: FastAPI review queue. Minimal HTML UI. VaultWriter with markers. End-to-end flow: URL → archive → Qdrant → proposals → review → vault. This is the MVP.
 
 **After MVP is in daily use**: measure approval rate, time-to-review, vault quality. Let real usage tell you what to optimize. Don't guess.
 

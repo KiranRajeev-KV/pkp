@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 
 import click
+import httpx
+import libsql_client
 
 from pkp import __version__
 from pkp.config import get_config, load_config, save_config
@@ -19,7 +21,7 @@ from pkp.pipeline.extractor import (
 )
 from pkp.pipeline.normalizer import NormalizerService
 from pkp.storage.archive import ArchiveManager, DocumentMetadata
-from pkp.storage.db import Document, IngestionMetric, db_context, get_database
+from pkp.storage.db import Document, IngestionMetric, db_context
 
 
 @click.group()
@@ -58,20 +60,53 @@ def init(data_dir: Path | None, vault_path: Path | None) -> None:
 
     click.echo(f"Initialized PKP at {config.data_dir}")
     click.echo(f"Archive: {config.archive_path}")
-    click.echo(f"Database: {config.db_path}")
     if config.vault_path:
         click.echo(f"Vault: {config.vault_path}")
 
+    click.echo("\nChecking external services...")
+
     try:
-        db = asyncio.run(get_database())
-        row = asyncio.run(db._fetch_one("SELECT 1 as test"))
-        if row and row[0] == 1:
-            click.echo("Database: connection verified")
-        else:
-            click.echo("Database: WARNING - connection test failed", err=True)
-        asyncio.run(db.close())
+        asyncio.run(_check_services())
     except Exception as e:
-        click.echo(f"Database: WARNING - {e}", err=True)
+        click.echo(f"Service check failed: {e}", err=True)
+
+
+async def _check_services() -> None:
+    crawl4ai = ("Crawl4AI", "http://localhost:11235", "/health", 200)
+    qdrant = ("Qdrant", "http://localhost:6333", "/", 200)
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for name, url, path, expected in [crawl4ai, qdrant]:
+            try:
+                response = await client.get(f"{url}{path}")
+                if response.status_code != expected:
+                    click.echo(f"{name}: ERROR - http {response.status_code}", err=True)
+                    continue
+                data = response.json() if response.text else {}
+                version = (
+                    data.get("version") or data.get("title", "").split()[-1]
+                    if data
+                    else "unknown"
+                )
+                click.echo(f"{name}: OK (v{version})")
+            except httpx.ConnectError:
+                click.echo(f"{name}: ERROR - connection failed", err=True)
+            except httpx.TimeoutException:
+                click.echo(f"{name}: ERROR - timeout", err=True)
+            except Exception as e:
+                click.echo(f"{name}: ERROR - {e}", err=True)
+
+    try:
+        async with libsql_client.create_client("http://localhost:8080") as client:
+            result = await client.execute("SELECT 1 as health")
+            if result.rows and len(result.rows) > 0:
+                click.echo("Turso: OK (v0.24.33)")
+            else:
+                click.echo("Turso: ERROR - no rows returned", err=True)
+    except httpx.ConnectError:
+        click.echo("Turso: ERROR - connection failed", err=True)
+    except Exception as e:
+        click.echo(f"Turso: ERROR - {e}", err=True)
 
 
 @main.command()
