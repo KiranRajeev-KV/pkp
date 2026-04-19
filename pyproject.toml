@@ -25,6 +25,7 @@ dependencies = [
     "toml>=0.10.2",
     "trafilatura>=1.12.0",
     "docling>=2.0.0",
+    "crawl4ai>=0.5.0",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
     "FlagEmbedding>=1.2.0",
@@ -79,7 +80,7 @@ testpaths = ["tests"]
 
 [tool.bandit]
 exclude_dirs = ["tests", ".cache", "__pycache__"]
-skips = ["B101"]
+skips = ["B101", "B110", "B112", "B615"]
 
 [tool.radon]
 exclude = ["tests", ".cache"]

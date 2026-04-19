@@ -7,6 +7,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 import click
@@ -724,18 +725,11 @@ async def _do_rebuild_index(
     filter_doc_type: str | None, rebuild_all: bool = False
 ) -> None:
     """Rebuild Qdrant index from archived chunks."""
-    import json
-    from pathlib import Path
-
     from pkp.config import get_config
-    from pkp.embedder import get_embedder
     from pkp.storage.db import db_context
     from pkp.storage.qdrant import (
-        _get_collection_name,
         _get_qdrant_client,
-        ensure_collection,
         qdrant_available,
-        upsert_vectors,
     )
 
     config = get_config()
@@ -757,24 +751,49 @@ async def _do_rebuild_index(
         else:
             doc_types = []
 
-    if rebuild_all:
-        click.echo("Dropping all collections for rebuild...")
-        for dtype in doc_types:
-            if filter_doc_type and dtype != filter_doc_type:
-                continue
-            collection_name = _get_collection_name(dtype)
-            try:
-                client.delete_collection(collection_name=collection_name)
-                click.echo(f"Dropped {collection_name}")
-            except Exception:
-                pass
+    await _setup_collections(client, doc_types, filter_doc_type, rebuild_all)
 
-        for dtype in doc_types:
-            if filter_doc_type and dtype != filter_doc_type:
-                continue
-            ensure_collection(dtype)
-            click.echo(f"Created collection: {dtype}_v1")
+    total_upserted, total_docs = await _index_documents(
+        client, documents, filter_doc_type
+    )
 
+    click.echo(f"Done: {total_upserted} chunks indexed from {total_docs} documents")
+
+
+async def _setup_collections(
+    client: Any,
+    doc_types: list[str],
+    filter_doc_type: str | None,
+    rebuild_all: bool,
+) -> None:
+    """Set up or drop collections based on rebuild mode."""
+    from pkp.storage.qdrant import _get_collection_name, ensure_collection
+
+    if not rebuild_all or not doc_types:
+        return
+
+    click.echo("Dropping all collections for rebuild...")
+    for dtype in doc_types:
+        if filter_doc_type and dtype != filter_doc_type:
+            continue
+        collection_name = _get_collection_name(dtype)
+        try:
+            client.delete_collection(collection_name=collection_name)
+            click.echo(f"Dropped {collection_name}")
+        except Exception:
+            pass
+
+    for dtype in doc_types:
+        if filter_doc_type and dtype != filter_doc_type:
+            continue
+        ensure_collection(dtype)
+        click.echo(f"Created collection: {dtype}_v1")
+
+
+async def _index_documents(
+    client: Any, documents: list[Any], filter_doc_type: str | None
+) -> tuple[int, int]:
+    """Index documents into Qdrant."""
     total_upserted = 0
     total_docs = 0
 
@@ -782,85 +801,103 @@ async def _do_rebuild_index(
         if filter_doc_type and doc.doc_type != filter_doc_type:
             continue
 
-        total_docs += 1
-        doc_dir = Path(doc.archive_path)
+        result = await _index_single_document(client, doc, filter_doc_type)
+        if result:
+            total_docs += 1
+            total_upserted += result
 
-        chunks_file = doc_dir / "chunks.jsonl"
-        if not chunks_file.exists():
-            click.echo(f"Skipping {doc.sha256[:16]}: no chunks file")
-            continue
+    return total_upserted, total_docs
 
-        collection_name = _get_collection_name(doc.doc_type)
 
+async def _index_single_document(
+    client: Any, doc: Any, filter_doc_type: str | None
+) -> int | None:
+    """Index a single document into Qdrant."""
+    import json
+    from pathlib import Path
+
+    from pkp.embedder import get_embedder
+    from pkp.storage.qdrant import (
+        _get_collection_name,
+        ensure_collection,
+        upsert_vectors,
+    )
+
+    doc_dir = Path(doc.archive_path)
+    chunks_file = doc_dir / "chunks.jsonl"
+
+    if not chunks_file.exists():
+        click.echo(f"Skipping {doc.sha256[:16]}: no chunks file")
+        return None
+
+    collection_name = _get_collection_name(doc.doc_type)
+
+    try:
+        client.scroll(collection_name=collection_name, limit=1, with_payload=False)
+    except Exception:
         try:
-            client.scroll(collection_name=collection_name, limit=1, with_payload=False)
-        except Exception:
-            try:
-                ensure_collection(doc.doc_type)
-            except Exception as e:
-                click.echo(f"Skipping {doc.doc_type}: {e}")
-                continue
-
-        chunks: list[dict] = []
-        with open(chunks_file, encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    chunks.append(json.loads(line))
-
-        if not chunks:
-            continue
-
-        try:
-            embedder = get_embedder()
-
-            chunk_texts = [c["content"] for c in chunks]
-            embeddings = embedder.embed_chunks(chunk_texts)
-
-            vectors: list[list[float]] = []
-            sparse_data: list[tuple[list[int], list[float]]] = []
-            payloads: list[dict] = []
-
-            for idx, emb in enumerate(embeddings):
-                chunk = chunks[idx]
-                payload = {
-                    "chunk_id": chunk["chunk_id"],
-                    "doc_sha256": doc.sha256,
-                    "chunk_index": chunk["chunk_index"],
-                    "content": chunk["content"],
-                    "char_start": chunk.get("char_start", 0),
-                    "char_end": chunk.get("char_end", 0),
-                    "token_count": chunk.get("token_count"),
-                    "title": doc.title,
-                    "url": doc.url,
-                    "doc_type": doc.doc_type,
-                }
-
-                vectors.append(emb.dense.tolist())
-
-                indices, values = embedder.tokens_to_indices(
-                    chunk["content"], emb.sparse[0]
-                )
-                sparse_data.append((indices, values))
-
-                payloads.append(payload)
-
-            chunk_ids = [c["chunk_id"] for c in chunks]
-            upsert_vectors(
-                doc_type=doc.doc_type,
-                chunk_ids=chunk_ids,
-                dense_vectors=vectors,
-                sparse_data=sparse_data,
-                payloads=payloads,
-            )
-
-            total_upserted += len(chunks)
-            click.echo(f"Indexed {doc.sha256[:16]}: {len(chunks)} chunks")
-
+            ensure_collection(doc.doc_type)
         except Exception as e:
-            click.echo(f"Error indexing {doc.sha256[:16]}: {e}")
-            continue
+            click.echo(f"Skipping {doc.doc_type}: {e}")
+            return None
 
-    click.echo(f"Done: {total_upserted} chunks indexed from {total_docs} documents")
+    chunks: list[dict] = []
+    with open(chunks_file, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                chunks.append(json.loads(line))
+
+    if not chunks:
+        return None
+
+    try:
+        embedder = get_embedder()
+        chunk_texts = [c["content"] for c in chunks]
+        embeddings = embedder.embed_chunks(chunk_texts)
+
+        vectors: list[list[float]] = []
+        sparse_data: list[tuple[list[int], list[float]]] = []
+        payloads: list[dict] = []
+
+        for idx, emb in enumerate(embeddings):
+            chunk = chunks[idx]
+            payload = {
+                "chunk_id": chunk["chunk_id"],
+                "doc_sha256": doc.sha256,
+                "chunk_index": chunk["chunk_index"],
+                "content": chunk["content"],
+                "char_start": chunk.get("char_start", 0),
+                "char_end": chunk.get("char_end", 0),
+                "token_count": chunk.get("token_count"),
+                "title": doc.title,
+                "url": doc.url,
+                "doc_type": doc.doc_type,
+            }
+
+            vectors.append(emb.dense.tolist())
+
+            indices, values = embedder.tokens_to_indices(
+                chunk["content"], emb.sparse[0]
+            )
+            sparse_data.append((indices, values))
+
+            payloads.append(payload)
+
+        chunk_ids = [c["chunk_id"] for c in chunks]
+        upsert_vectors(
+            doc_type=doc.doc_type,
+            chunk_ids=chunk_ids,
+            dense_vectors=vectors,
+            sparse_data=sparse_data,
+            payloads=payloads,
+        )
+
+        click.echo(f"Indexed {doc.sha256[:16]}: {len(chunks)} chunks")
+        return len(chunks)
+
+    except Exception as e:
+        click.echo(f"Error indexing {doc.sha256[:16]}: {e}")
+        return None
 
 
 if __name__ == "__main__":

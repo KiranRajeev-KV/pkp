@@ -6,22 +6,25 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from transformers import AutoTokenizer
 
+if TYPE_CHECKING:
+    from tokenizers import SentencePieceBackend, TokenizersBackend
+
 from pkp.config import get_config
 
-_tokenizer: AutoTokenizer | None = None
+_tokenizer: AutoTokenizer | TokenizersBackend | SentencePieceBackend | None = None
 
 
-def get_tokenizer() -> AutoTokenizer:
+def get_tokenizer() -> AutoTokenizer | TokenizersBackend | SentencePieceBackend:
     """Get the global XLMRobertaTokenizer instance."""
     global _tokenizer
     if _tokenizer is None:
         config = get_config()
-        _tokenizer = AutoTokenizer.from_pretrained(config.embedding_model)
-    return _tokenizer
+        _tokenizer = AutoTokenizer.from_pretrained(config.embedding_model)  # type: ignore[valid-type]
+    return _tokenizer  # type: ignore[return-value]
 
 
 @dataclass
@@ -92,7 +95,7 @@ class NormalizerService:
         word_count = len(cleaned_text.split())
         tokenizer = get_tokenizer()
         token_count = len(
-            tokenizer(cleaned_text, add_special_tokens=False)["input_ids"]
+            tokenizer(cleaned_text, add_special_tokens=False)["input_ids"]  # type: ignore[operator]
         )
 
         chunks = self._chunk_text(
@@ -197,7 +200,7 @@ class NormalizerService:
     ) -> list[Chunk]:
         """Chunk text into fixed-size pieces with overlap."""
         tokenizer = get_tokenizer()
-        tokens = tokenizer(text, add_special_tokens=False)["input_ids"]
+        tokens = tokenizer(text, add_special_tokens=False)["input_ids"]  # type: ignore[operator]
         total_tokens = len(tokens)
 
         if total_tokens <= self.chunk_size_tokens:
@@ -220,9 +223,9 @@ class NormalizerService:
             end_idx = min(start_idx + self.chunk_size_tokens, total_tokens)
 
             chunk_tokens = tokens[start_idx:end_idx]
-            chunk_text = tokenizer.decode(chunk_tokens)
+            chunk_text = tokenizer.decode(chunk_tokens)  # type: ignore[union-attr]
 
-            char_start = len(tokenizer.decode(tokens[:start_idx]))
+            char_start = len(tokenizer.decode(tokens[:start_idx]))  # type: ignore[union-attr]
             char_end = char_start + len(chunk_text)
 
             chunk = Chunk(

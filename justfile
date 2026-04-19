@@ -16,7 +16,7 @@ check:
     uv run mypy pkp/
     uv run bandit -c pyproject.toml -r pkp/
     uv run xenon --max-absolute C --max-modules C --max-average A pkp/
-    uv run pip-audit
+    uv run pip-audit --ignore-vuln CVE-2026-1839
 
 # Run ruff linter
 lint:

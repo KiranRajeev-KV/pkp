@@ -41,6 +41,11 @@ class PKPConfig:
     chunk_size_tokens: int = 512
     chunk_overlap_tokens: int = 64
 
+    crawl4ai_timeout: float = 30.0
+    crawl4ai_browser_type: str = "chromium"
+    crawl4ai_headless: bool = True
+    fallback_word_count_threshold: int = 150
+
     proposal_top_n: int = 10
     reranker: str = "none"
 
@@ -85,6 +90,10 @@ class PKPConfig:
             "llm_model": self.llm_model,
             "chunk_size_tokens": self.chunk_size_tokens,
             "chunk_overlap_tokens": self.chunk_overlap_tokens,
+            "crawl4ai_timeout": self.crawl4ai_timeout,
+            "crawl4ai_browser_type": self.crawl4ai_browser_type,
+            "crawl4ai_headless": self.crawl4ai_headless,
+            "fallback_word_count_threshold": self.fallback_word_count_threshold,
             "proposal_top_n": self.proposal_top_n,
             "reranker": self.reranker,
         }
@@ -112,6 +121,12 @@ class PKPConfig:
             llm_model=data.get("llm_model", "mistral-nemo"),
             chunk_size_tokens=data.get("chunk_size_tokens", 512),
             chunk_overlap_tokens=data.get("chunk_overlap_tokens", 64),
+            crawl4ai_timeout=data.get("crawl4ai_timeout", 30.0),
+            crawl4ai_browser_type=data.get("crawl4ai_browser_type", "chromium"),
+            crawl4ai_headless=data.get("crawl4ai_headless", True),
+            fallback_word_count_threshold=data.get(
+                "fallback_word_count_threshold", 150
+            ),
             proposal_top_n=data.get("proposal_top_n", 10),
             reranker=data.get("reranker", "none"),
         )
