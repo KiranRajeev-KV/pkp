@@ -58,7 +58,11 @@ class ArchiveManager:
     def document_exists(self, sha256: str) -> bool:
         """Check if a document exists in the archive."""
         doc_dir = self.get_document_dir(sha256)
-        return doc_dir.exists() and (doc_dir / "original.html").exists()
+        if not doc_dir.exists():
+            return False
+        return (doc_dir / "original.html").exists() or (
+            doc_dir / "original.pdf"
+        ).exists()
 
     def write_original(
         self, sha256: str, content: bytes, extension: str = ".html"
