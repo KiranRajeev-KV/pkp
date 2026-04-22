@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from pkp.config import get_config
@@ -9,10 +10,17 @@ from pkp.config import get_config
 from .db import db_context
 from .models import SearchResult
 
+PKP_POINT_NAMESPACE = uuid.UUID("95f9de35-3ce7-4912-89a4-cfe9f9c26798")
+
 
 def _get_collection_name(doc_type: str) -> str:
-    """Get Qdrant collection name for a doc_type."""
+    """Get the physical Qdrant collection name for a doc_type."""
     return f"{doc_type}_v1"
+
+
+def _get_collection_alias(doc_type: str) -> str:
+    """Get the stable alias name for a doc_type collection."""
+    return f"{doc_type}_current"
 
 
 def _get_qdrant_client() -> Any:
@@ -21,6 +29,60 @@ def _get_qdrant_client() -> Any:
     from qdrant_client import QdrantClient
 
     return QdrantClient(url=config.qdrant_url)
+
+
+def _point_id_for_chunk(chunk_id: str) -> str:
+    """Return a stable Qdrant point ID for a chunk."""
+    return str(uuid.uuid5(PKP_POINT_NAMESPACE, chunk_id))
+
+
+def _list_collection_names() -> set[str]:
+    """Return the set of collection names currently present in Qdrant."""
+    client = _get_qdrant_client()
+    return {collection.name for collection in client.get_collections().collections}
+
+
+def _get_alias_mappings() -> dict[str, str]:
+    """Return all Qdrant alias mappings."""
+    client = _get_qdrant_client()
+    response = client.get_aliases()
+    return {alias.alias_name: alias.collection_name for alias in response.aliases}
+
+
+def _get_upsert_collection_name(doc_type: str) -> str:
+    """Return the best collection target for writes."""
+    alias_name = _get_collection_alias(doc_type)
+    physical_name = _get_collection_name(doc_type)
+
+    try:
+        alias_mappings = _get_alias_mappings()
+        if alias_mappings.get(alias_name) == physical_name:
+            return alias_name
+    except Exception:
+        return physical_name
+
+    return physical_name
+
+
+def _get_query_collection_name(doc_type: str) -> str | None:
+    """Return the safe collection target for reads."""
+    alias_name = _get_collection_alias(doc_type)
+    physical_name = _get_collection_name(doc_type)
+
+    try:
+        alias_mappings = _get_alias_mappings()
+    except Exception:
+        alias_mappings = None
+
+    if alias_mappings and alias_mappings.get(alias_name) == physical_name:
+        return alias_name
+
+    collection_names = _list_collection_names()
+
+    if physical_name in collection_names:
+        return physical_name
+
+    return None
 
 
 def _warn_dimension_mismatch(config_vector_size: int) -> None:
@@ -50,16 +112,17 @@ def ensure_collection(doc_type: str) -> bool:
     """
     from qdrant_client import models
 
-    config = get_config()
-    collection_name = _get_collection_name(doc_type)
     client = _get_qdrant_client()
+    collection_name = _get_collection_name(doc_type)
+    alias_name = _get_collection_alias(doc_type)
+    config = get_config()
 
     vector_size = config.embedding_dimension
 
     _warn_dimension_mismatch(vector_size)
 
-    collections = client.get_collections().collections
-    exists = any(c.name == collection_name for c in collections)
+    collection_names = _list_collection_names()
+    exists = collection_name in collection_names
 
     if not exists:
         client.create_collection(
@@ -72,6 +135,30 @@ def ensure_collection(doc_type: str) -> bool:
             },
             sparse_vectors_config={"sparse": models.SparseVectorParams()},
         )
+
+    try:
+        alias_mappings = _get_alias_mappings()
+        if alias_mappings.get(alias_name) != collection_name:
+            operations: list[Any] = []
+            if alias_name in alias_mappings:
+                operations.append(
+                    models.DeleteAliasOperation(
+                        delete_alias=models.DeleteAlias(alias_name=alias_name)
+                    )
+                )
+            operations.append(
+                models.CreateAliasOperation(
+                    create_alias=models.CreateAlias(
+                        collection_name=collection_name,
+                        alias_name=alias_name,
+                    )
+                )
+            )
+            client.update_collection_aliases(change_aliases_operations=operations)
+    except Exception:
+        # Alias APIs are optional for PKP; physical collections still work.
+        pass
+
     return not exists
 
 
@@ -103,22 +190,23 @@ def upsert_vectors(
     """
     from qdrant_client import models
 
-    collection_name = _get_collection_name(doc_type)
+    collection_name = _get_upsert_collection_name(doc_type)
     client = _get_qdrant_client()
 
     points = []
     for i, chunk_id in enumerate(chunk_ids):
         sparse_indices, sparse_values = sparse_data[i]
+        point_id = _point_id_for_chunk(chunk_id)
 
         if not sparse_indices:
             point = models.PointStruct(
-                id=i,
+                id=point_id,
                 vector=dense_vectors[i],
                 payload={**payloads[i], "chunk_id": chunk_id},
             )
         else:
             point = models.PointStruct(
-                id=i,
+                id=point_id,
                 vector={
                     "dense": dense_vectors[i],
                     "sparse": models.SparseVector(
@@ -164,7 +252,7 @@ async def search_qdrant(
     prefetch_limit = min(limit * 2, 100)
 
     if doc_type is not None:
-        collection_name = _get_collection_name(doc_type)
+        collection_name = _get_query_collection_name(doc_type)
         query_filter = models.Filter(
             must=[
                 models.FieldCondition(
@@ -224,11 +312,10 @@ async def search_qdrant(
     results_by_doc: dict[str, SearchResult] = {}
 
     for dtype in doc_types:
-        try:
-            collection_name = _get_collection_name(dtype)
-            client = _get_qdrant_client()
-        except Exception:
-            break
+        collection_name = _get_query_collection_name(dtype)
+        if collection_name is None:
+            continue
+        client = _get_qdrant_client()
 
         try:
             query_sparse_vec = models.SparseVector(
