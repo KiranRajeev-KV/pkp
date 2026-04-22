@@ -10,13 +10,24 @@ default:
 # =============================================================================
 
 # Run all code quality checks
+#
+# Note:
+# lxml 5.x is currently required by Crawl4AI (<6 constraint),
+# while pip-audit flags CVE-2026-41066 with fix version in lxml 6.x.
+# Since upstream dependency resolution blocks upgrading to lxml>=6,
+# we temporarily ignore this CVE until Crawl4AI releases support.
+#
+# pip-audit supports ignoring specific vulnerabilities via:
+# --ignore-vuln CVE-XXXX-YYYY :contentReference[oaicite:0]{index=0}
 check:
     uv run ruff check pkp/
     uv run ruff format --check pkp/
     uv run mypy pkp/
     uv run bandit -c pyproject.toml -r pkp/
     uv run xenon --max-absolute C --max-modules C --max-average A pkp/
-    uv run pip-audit --ignore-vuln CVE-2026-1839
+    uv run pip-audit \
+        --ignore-vuln CVE-2026-1839 \
+        --ignore-vuln CVE-2026-41066
 
 # Run ruff linter
 lint:
@@ -44,7 +55,9 @@ complexity:
 
 # Run pip-audit vulnerability scan
 vulns:
-    uv run pip-audit
+    uv run pip-audit \
+        --ignore-vuln CVE-2026-1839 \
+        --ignore-vuln CVE-2026-41066
 
 # =============================================================================
 # Pre-commit hooks
