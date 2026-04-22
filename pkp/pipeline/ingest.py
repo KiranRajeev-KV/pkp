@@ -67,15 +67,24 @@ async def ingest_url(
     """Run the full URL ingest pipeline."""
     reporter = reporter or _noop_reporter
     total_start_ns = time.perf_counter_ns()
+    config = get_config()
 
     reporter(f"Extracting {url}...")
-    extractor = ExtractorService()
+    extractor = ExtractorService(
+        user_agent=config.user_agent,
+        crawl4ai_timeout=config.crawl4ai_timeout,
+        crawl4ai_browser_type=config.crawl4ai_browser_type,
+        crawl4ai_headless=config.crawl4ai_headless,
+        fallback_word_count_threshold=config.fallback_word_count_threshold,
+    )
     extracted = await extractor.extract(SourceRequest(url=url))
+    if extracted.raw_html is None:
+        raise RuntimeError(f"URL extraction returned no raw HTML for {url}")
 
     reporter(f"Extracted: {extracted.title} ({extracted.sha256[:16]}...)")
     return await _finish_ingest(
         extracted=extracted,
-        original_content=extracted.text.encode("utf-8"),
+        original_content=extracted.raw_html,
         original_extension=".html",
         metric_source=url,
         reporter=reporter,
@@ -90,9 +99,16 @@ async def ingest_pdf(
     """Run the full PDF ingest pipeline."""
     reporter = reporter or _noop_reporter
     total_start_ns = time.perf_counter_ns()
+    config = get_config()
 
     reporter(f"Extracting {pdf_path}...")
-    extractor = ExtractorService()
+    extractor = ExtractorService(
+        user_agent=config.user_agent,
+        crawl4ai_timeout=config.crawl4ai_timeout,
+        crawl4ai_browser_type=config.crawl4ai_browser_type,
+        crawl4ai_headless=config.crawl4ai_headless,
+        fallback_word_count_threshold=config.fallback_word_count_threshold,
+    )
     extracted = await extractor.extract(SourceRequest(pdf_path=pdf_path))
 
     reporter(f"Extracted: {extracted.title} ({extracted.sha256[:16]}...)")
@@ -494,7 +510,7 @@ async def _setup_collections(
         if filter_doc_type and dtype != filter_doc_type:
             continue
         ensure_collection(dtype)
-        reporter(f"Created collection: {dtype}_v1")
+        reporter(f"Created collection: {_get_collection_name(dtype)}")
 
 
 async def _index_documents(

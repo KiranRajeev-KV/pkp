@@ -32,6 +32,7 @@ class ExtractedDocument:
     url: str | None
     title: str
     text: str
+    raw_html: bytes | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     doc_type: str = "article"
     archive_path: Path | None = None
@@ -89,6 +90,7 @@ class TrafilaturaExtractor:
             ) as client:
                 response = await client.get(url)
                 response.raise_for_status()
+                raw_html = response.content
                 html = response.text
         except httpx.HTTPStatusError as e:
             raise NetworkError(
@@ -112,7 +114,7 @@ class TrafilaturaExtractor:
                 "The page may be paywalled, JavaScript-rendered, or unavailable."
             )
 
-        docsha256 = hashlib.sha256(html.encode("utf-8")).hexdigest()
+        docsha256 = hashlib.sha256(raw_html).hexdigest()
 
         metadata: dict[str, Any] = {}
         try:
@@ -136,6 +138,7 @@ class TrafilaturaExtractor:
             url=url,
             title=title,
             text=result,
+            raw_html=raw_html,
             metadata=metadata,
             doc_type="article",
             extraction_time_ms=extraction_time_ms,
@@ -150,7 +153,9 @@ class TrafilaturaExtractor:
                 return line[2:].strip()
         return "Untitled Document"
 
-    def extract_from_html(self, html: str, url: str) -> ExtractedDocument | None:
+    def extract_from_html(
+        self, html: str, url: str, raw_html: bytes | None = None
+    ) -> ExtractedDocument | None:
         """Extract content from pre-fetched HTML (fallback from Crawl4AI).
 
         Processes HTML that was already fetched by another extractor,
@@ -171,7 +176,8 @@ class TrafilaturaExtractor:
         if not result or len(result.strip()) < 50:
             return None
 
-        docsha256 = hashlib.sha256(html.encode("utf-8")).hexdigest()
+        html_bytes = raw_html or html.encode("utf-8")
+        docsha256 = hashlib.sha256(html_bytes).hexdigest()
 
         metadata: dict[str, Any] = {}
         try:
@@ -193,6 +199,7 @@ class TrafilaturaExtractor:
             url=url,
             title=title,
             text=result,
+            raw_html=html_bytes,
             metadata=metadata,
             doc_type="article",
             extraction_time_ms=0,
@@ -421,11 +428,10 @@ class ExtractorService:
 
                 if crawl_result.success and crawl_result.word_count > 0:
                     html_content = crawl_result.html
+                    raw_html = html_content.encode("utf-8")
 
                     if crawl_result.word_count >= self.fallback_word_count_threshold:
-                        docsha256 = hashlib.sha256(
-                            html_content.encode("utf-8")
-                        ).hexdigest()
+                        docsha256 = hashlib.sha256(raw_html).hexdigest()
 
                         metadata: dict[str, Any] = {}
                         try:
@@ -458,6 +464,7 @@ class ExtractorService:
                             url=url,
                             title=title,
                             text=crawl_result.fit_markdown,
+                            raw_html=raw_html,
                             metadata=metadata,
                             doc_type="article",
                             extraction_time_ms=extraction_time_ms,
@@ -465,7 +472,7 @@ class ExtractorService:
 
                     if html_content and len(html_content.strip()) > 100:
                         fallback_result = self.url_extractor.extract_from_html(
-                            html_content, url
+                            html_content, url, raw_html=raw_html
                         )
                         if fallback_result and len(fallback_result.text) > len(
                             crawl_result.fit_markdown
@@ -474,8 +481,9 @@ class ExtractorService:
                                 (time.perf_counter() - start_time) * 1000
                             )
                             fallback_result.sha256 = hashlib.sha256(
-                                html_content.encode("utf-8")
+                                raw_html
                             ).hexdigest()
+                            fallback_result.raw_html = raw_html
                             return fallback_result
 
                     logger.debug(
