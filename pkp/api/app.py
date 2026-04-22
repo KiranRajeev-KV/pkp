@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 import httpx
@@ -12,6 +12,7 @@ from fastapi import FastAPI, Response
 from pydantic import BaseModel
 
 from pkp import __version__
+from pkp.api.worker import worker_loop
 from pkp.config import get_config
 from pkp.storage.db import (
     Database,
@@ -117,15 +118,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
     config = get_config()
     config.ensure_dirs()
+    worker_task: asyncio.Task[None] | None = None
 
     try:
         await _db_dep()
     except Exception as e:
         raise RuntimeError(f"Failed to initialize database: {e}") from e
 
-    yield
+    worker_task = asyncio.create_task(worker_loop(), name="pkp-worker")
 
-    await _db_dep.close()
+    try:
+        yield
+    finally:
+        if worker_task is not None:
+            worker_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker_task
+        await _db_dep.close()
 
 
 def get_application() -> FastAPI:

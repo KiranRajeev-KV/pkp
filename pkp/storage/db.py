@@ -129,6 +129,7 @@ class Database:
         """Connect to the database and run migrations."""
         self._conn = await aiosqlite.connect(str(self.db_path))
         self._conn.row_factory = aiosqlite.Row
+        await self._conn.execute("PRAGMA busy_timeout = 5000")
 
         statements = [s.strip() for s in SCHEMA.split(";") if s.strip()]
         for stmt in statements:
@@ -241,13 +242,41 @@ class Database:
     async def claim_job(self, job_id: str) -> Job | None:
         """Claim a pending job for processing."""
         now = datetime.now(UTC).isoformat()
-        await self._exec(
-            "UPDATE jobs SET status = 'running', started_at = ? WHERE job_id = ? AND status = 'pending'",
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """UPDATE jobs
+            SET status = 'running', started_at = ?, completed_at = NULL, error = NULL
+            WHERE job_id = ? AND status = 'pending'
+            RETURNING *""",
             (now, job_id),
         )
-        assert self._conn is not None
+        row = await cursor.fetchone()
+        await cursor.close()
         await self._conn.commit()
-        row = await self._fetch_one("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
+        if row is None:
+            return None
+        return self._row_to_job(row)
+
+    async def claim_next_pending_job(self) -> Job | None:
+        """Atomically claim the oldest pending job."""
+        now = datetime.now(UTC).isoformat()
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """UPDATE jobs
+            SET status = 'running', started_at = ?, completed_at = NULL, error = NULL
+            WHERE job_id = (
+                SELECT job_id
+                FROM jobs
+                WHERE status = 'pending'
+                ORDER BY created_at ASC
+                LIMIT 1
+            )
+            RETURNING *""",
+            (now,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        await self._conn.commit()
         if row is None:
             return None
         return self._row_to_job(row)
@@ -262,6 +291,30 @@ class Database:
         )
         assert self._conn is not None
         await self._conn.commit()
+
+    async def reset_job_to_pending(self, job_id: str) -> None:
+        """Return an interrupted running job to the pending queue."""
+        await self._exec(
+            """UPDATE jobs
+            SET status = 'pending', started_at = NULL, completed_at = NULL, error = NULL
+            WHERE job_id = ?""",
+            (job_id,),
+        )
+        assert self._conn is not None
+        await self._conn.commit()
+
+    async def reset_running_jobs(self) -> int:
+        """Return all interrupted running jobs to the pending queue."""
+        assert self._conn is not None
+        cursor = await self._conn.execute(
+            """UPDATE jobs
+            SET status = 'pending', started_at = NULL, completed_at = NULL, error = NULL
+            WHERE status = 'running'"""
+        )
+        await self._conn.commit()
+        rowcount = cursor.rowcount
+        await cursor.close()
+        return rowcount
 
     async def create_job(
         self, job_id: str, job_type: str, payload: dict[str, Any]
