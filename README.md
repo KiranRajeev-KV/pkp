@@ -12,8 +12,8 @@ pip install pkp
 
 ```bash
 pkp init
-pkp ingest url https://example.com/article
-pkp ingest pdf document.pdf
+pkp ingest-url https://example.com/article
+pkp ingest-pdf document.pdf
 pkp serve
 ```
 

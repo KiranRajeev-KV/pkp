@@ -284,37 +284,35 @@ async def _do_search(
                 async with db_context() as db:
                     results = await db.search_documents(query, limit)
 
-            if json_output:
-                import json
+        if json_output:
+            import json
 
-                output = [
-                    {
-                        "doc_sha256": r.doc_sha256,
-                        "title": r.title,
-                        "url": r.url,
-                        "match_count": r.match_count,
-                        "best_rank": r.best_rank,
-                    }
-                    for r in results
-                ]
-                click.echo(json.dumps(output, indent=2))
-                return
+            output = [
+                {
+                    "doc_sha256": r.doc_sha256,
+                    "title": r.title,
+                    "url": r.url,
+                    "match_count": r.match_count,
+                    "best_rank": r.best_rank,
+                }
+                for r in results
+            ]
+            click.echo(json.dumps(output, indent=2))
+            return
 
-            if not results:
-                click.echo("No results found.")
-                return
+        if not results:
+            click.echo("No results found.")
+            return
 
-            click.echo(f"{'TITLE':<25} {'URL':<30} {'CHUNKS':<8} {'RANK'}")
-            click.echo("-" * 75)
+        click.echo(f"{'TITLE':<25} {'URL':<30} {'CHUNKS':<8} {'RANK'}")
+        click.echo("-" * 75)
 
-            for r in results:
-                title = r.title[:24] if len(r.title) > 24 else r.title
-                url = r.url or ""
-                if len(url) > 29:
-                    url = url[:26] + "..."
-                click.echo(
-                    f"{title:<25} {url:<30} {r.match_count:<8} {r.best_rank:.2f}"
-                )
+        for r in results:
+            title = r.title[:24] if len(r.title) > 24 else r.title
+            url = r.url or ""
+            if len(url) > 29:
+                url = url[:26] + "..."
+            click.echo(f"{title:<25} {url:<30} {r.match_count:<8} {r.best_rank:.2f}")
 
     except Exception as e:
         click.echo(f"Search error: {e}", err=True)
