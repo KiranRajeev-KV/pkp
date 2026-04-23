@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from pkp.pipeline.ingest import ingest_pdf, ingest_url, rebuild_index
+from pkp.pipeline.proposals import generate_proposals
 from pkp.storage.db import Job, db_context
 
 logger = logging.getLogger(__name__)
@@ -122,9 +123,12 @@ async def _dispatch_job(job_type: str, payload: dict[str, Any]) -> None:
         return
 
     if job_type == "generate_proposals":
+        doc_sha256 = str(payload["doc_sha256"])
+        inserted_count = await generate_proposals(doc_sha256)
         logger.info(
-            "worker proposals not yet implemented doc_sha256=%s",
-            payload.get("doc_sha256"),
+            "worker generated proposals doc_sha256=%s inserted_count=%s",
+            doc_sha256,
+            inserted_count,
         )
         return
 
