@@ -453,6 +453,42 @@ class Database:
         assert self._conn is not None
         await self._conn.commit()
 
+    async def proposal_exists(self, doc_a_sha256: str, doc_b_sha256: str) -> bool:
+        """Check whether a proposal exists for a document pair in any order."""
+        row = await self._fetch_one(
+            """SELECT 1
+            FROM proposals
+            WHERE (doc_a_sha256 = ? AND doc_b_sha256 = ?)
+               OR (doc_a_sha256 = ? AND doc_b_sha256 = ?)
+            LIMIT 1""",
+            (doc_a_sha256, doc_b_sha256, doc_b_sha256, doc_a_sha256),
+        )
+        return row is not None
+
+    async def rejected_pair_exists(self, doc_a_sha256: str, doc_b_sha256: str) -> bool:
+        """Check whether a rejected pair exists for a document pair in any order."""
+        row = await self._fetch_one(
+            """SELECT 1
+            FROM rejected_pairs
+            WHERE (doc_a_sha256 = ? AND doc_b_sha256 = ?)
+               OR (doc_a_sha256 = ? AND doc_b_sha256 = ?)
+            LIMIT 1""",
+            (doc_a_sha256, doc_b_sha256, doc_b_sha256, doc_a_sha256),
+        )
+        return row is not None
+
+    async def insert_rejected_pair(self, doc_a_sha256: str, doc_b_sha256: str) -> None:
+        """Insert a rejected document pair."""
+        rejected_at = datetime.now(UTC).isoformat()
+        await self._exec(
+            """INSERT OR REPLACE INTO rejected_pairs
+            (doc_a_sha256, doc_b_sha256, rejected_at)
+            VALUES (?, ?, ?)""",
+            (doc_a_sha256, doc_b_sha256, rejected_at),
+        )
+        assert self._conn is not None
+        await self._conn.commit()
+
     async def get_proposals_by_status(
         self, status: str, limit: int = 50
     ) -> list[Proposal]:

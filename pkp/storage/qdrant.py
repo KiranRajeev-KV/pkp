@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -34,6 +35,33 @@ def _get_qdrant_client() -> Any:
 def _point_id_for_chunk(chunk_id: str) -> str:
     """Return a stable Qdrant point ID for a chunk."""
     return str(uuid.uuid5(PKP_POINT_NAMESPACE, chunk_id))
+
+
+def _query_response_points(results: Any) -> list[Any]:
+    """Return scored points from Qdrant query responses across client versions."""
+    points = getattr(results, "points", None)
+    if points is not None:
+        return list(points)
+
+    legacy_points = getattr(results, "result", None)
+    if legacy_points is not None:
+        return list(legacy_points)
+
+    return []
+
+
+def _sanitize_fts_query(query: str) -> str:
+    """Convert free text into a SQLite FTS-safe OR query string."""
+    query_terms: list[str] = []
+    seen_tokens: set[str] = set()
+
+    for token in re.findall(r"\w+", query.casefold()):
+        if token in seen_tokens:
+            continue
+        seen_tokens.add(token)
+        query_terms.append(f'"{token}"')
+
+    return " OR ".join(query_terms)
 
 
 def _list_collection_names() -> set[str]:
@@ -253,6 +281,8 @@ async def search_qdrant(
 
     if doc_type is not None:
         collection_name = _get_query_collection_name(doc_type)
+        if collection_name is None:
+            return []
         query_filter = models.Filter(
             must=[
                 models.FieldCondition(
@@ -291,7 +321,7 @@ async def search_qdrant(
         )
 
         seen_docs: dict[str, SearchResult] = {}
-        for point in results.result:
+        for point in _query_response_points(results):
             doc_sha = point.payload.get("doc_sha256", "")
             if not doc_sha:
                 continue
@@ -345,7 +375,7 @@ async def search_qdrant(
         except Exception:
             continue
 
-        for point in results.result:
+        for point in _query_response_points(results):
             doc_sha = point.payload.get("doc_sha256", "")
             if not doc_sha:
                 continue
@@ -378,9 +408,11 @@ async def search_documents_hybrid(query: str, limit: int = 10) -> list[SearchRes
     Returns:
         List of SearchResult.
     """
+    safe_query = _sanitize_fts_query(query)
+
     if not qdrant_available():
         async with db_context() as db:
-            return await db.search_documents(query, limit)
+            return await db.search_documents(safe_query or query, limit)
 
     try:
         from pkp.embedder import get_embedder
@@ -399,4 +431,4 @@ async def search_documents_hybrid(query: str, limit: int = 10) -> list[SearchRes
         )
     except Exception:
         async with db_context() as db:
-            return await db.search_documents(query, limit)
+            return await db.search_documents(safe_query or query, limit)
