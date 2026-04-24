@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from pkp import __version__
@@ -16,7 +17,7 @@ from pkp.api.deps import db_dependency, get_db
 from pkp.api.routes.ingest import router as ingest_router
 from pkp.api.routes.jobs import router as jobs_router
 from pkp.api.routes.proposals import router as proposals_router
-from pkp.api.worker import worker_loop
+from pkp.api.routes.queue import router as queue_router
 from pkp.config import get_config
 from pkp.storage.qdrant import (
     qdrant_available,
@@ -98,6 +99,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as e:
         raise RuntimeError(f"Failed to initialize database: {e}") from e
 
+    from pkp.api.worker import worker_loop
+
     worker_task = asyncio.create_task(worker_loop(), name="pkp-worker")
 
     try:
@@ -112,15 +115,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 def get_application() -> FastAPI:
     """Create the FastAPI application."""
+    static_dir = Path(__file__).resolve().parent / "static"
     app = FastAPI(
         title="PKP - Personal Knowledge Pipeline",
         description="Ingestion, retrieval, and proposal system",
         version=__version__,
         lifespan=lifespan,
     )
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
     app.include_router(proposals_router)
     app.include_router(jobs_router)
     app.include_router(ingest_router)
+    app.include_router(queue_router)
 
     return app
 
