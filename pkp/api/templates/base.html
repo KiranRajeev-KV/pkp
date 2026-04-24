@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title }}</title>
+    <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+    <script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.10/dist/htmx.min.js" integrity="sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V" crossorigin="anonymous"></script>
+    <script defer src="{{ url_for('static', path='queue.js') }}?v={{ asset_version|default('1') }}"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'sans-serif'],
+            },
+          },
+        },
+      }
+    </script>
+    <style>
+      [x-cloak] { display: none !important; }
+      .htmx-indicator { opacity: 0; transition: opacity 150ms ease; }
+      .htmx-request .htmx-indicator,
+      .htmx-request.htmx-indicator { opacity: 1; }
+      .htmx-swapping { opacity: 0; transition: opacity 150ms ease; }
+      .htmx-settling { opacity: 1; transition: opacity 150ms ease; }
+    </style>
+  </head>
+  <body class="min-h-screen bg-zinc-50 font-sans text-zinc-950 antialiased">
+    <div
+      class="min-h-screen"
+      x-data="queueApp()"
+      @keydown.window="handleKeyboardShortcut($event)"
+      @htmx:response-error.window="showToast('Something went wrong — proposal may no longer be pending')"
+      @queue:toast.window="showToast($event.detail.message)"
+    >
+      <header class="border-b border-zinc-200 bg-white">
+        <div class="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-4 sm:px-6">
+          <div class="flex items-center gap-3">
+            <div class="flex h-8 w-8 items-center justify-center rounded-md border border-zinc-200 bg-zinc-50 text-sm font-semibold text-zinc-900">
+              PKP
+            </div>
+            <div>
+              <p class="text-xs font-medium uppercase tracking-wide text-zinc-500">Personal Knowledge Pipeline</p>
+              <div class="mt-1 flex items-center gap-3">
+                <h1 class="text-xl font-semibold leading-6 text-zinc-950">Review Queue</h1>
+                {% include "queue/_pending_badge.html" %}
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main class="mx-auto max-w-5xl px-4 py-8 sm:px-6">
+        {% block content %}{% endblock %}
+      </main>
+
+      <div
+        class="fixed bottom-4 left-1/2 z-50 w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 sm:bottom-6"
+        x-show="toast.visible"
+        x-transition.opacity.duration.150ms
+        x-cloak
+      >
+        <div class="rounded-md border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-900 shadow-sm">
+          <span x-text="toast.message"></span>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

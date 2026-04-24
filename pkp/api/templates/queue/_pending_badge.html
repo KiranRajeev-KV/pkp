@@ -1,0 +1,10 @@
+<span
+  id="pending-count-badge"
+  {% if pending_badge_oob|default(false) %}hx-swap-oob="true"{% endif %}
+  class="inline-flex items-center rounded-full border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-xs font-medium text-zinc-700"
+  hx-get="/queue/pending-count"
+  hx-trigger="every 30s"
+  hx-swap="outerHTML"
+>
+  {{ pending_count }} pending
+</span>

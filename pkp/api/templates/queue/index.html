@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="space-y-6">
+    <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <p class="text-sm font-medium text-zinc-500">Connection review</p>
+        <h2 class="mt-1 text-2xl font-semibold leading-8 text-zinc-950">Decide what belongs in the vault.</h2>
+      </div>
+      <div class="inline-flex rounded-md border border-zinc-200 bg-white p-1 text-sm font-medium text-zinc-600">
+        <button
+          class="rounded px-3 py-1.5 transition"
+          type="button"
+          :class="mode === 'single' ? 'bg-white text-zinc-950 shadow-sm' : 'text-zinc-600 hover:text-zinc-950'"
+          @click="switchToSingleMode()"
+        >
+          Single
+        </button>
+        <button
+          class="rounded px-3 py-1.5 transition"
+          type="button"
+          :class="mode === 'batch' ? 'bg-white text-zinc-950 shadow-sm' : 'text-zinc-600 hover:text-zinc-950'"
+          @click="mode = 'batch'"
+          hx-get="/queue/batch"
+          hx-target="#batch-slot"
+          hx-swap="innerHTML"
+        >
+          Batch
+        </button>
+      </div>
+    </div>
+
+    <div x-show="!mode || mode === 'single'" x-transition.opacity.duration.150ms>
+      <div id="single-slot" hx-get="/queue/next" hx-trigger="refresh-single-queue from:body" hx-target="#single-slot" hx-swap="innerHTML">
+        {% if proposal %}
+          {% include "queue/_proposal_card.html" %}
+        {% else %}
+          {% include "queue/_empty_state.html" %}
+        {% endif %}
+      </div>
+    </div>
+
+    <div x-show="mode && mode === 'batch'" x-transition.opacity.duration.150ms x-cloak>
+      <div id="batch-slot">
+        <div class="rounded-lg border border-zinc-200 bg-white p-6 text-sm text-zinc-600">
+          Batch mode loads pending proposals when selected.
+        </div>
+      </div>
+    </div>
+  </section>
+{% endblock %}

@@ -1,0 +1,14 @@
+<div id="proposal-slot">
+  <section class="rounded-lg border border-zinc-200 bg-white p-8 text-center shadow-sm">
+    <p class="text-sm font-medium text-zinc-500">Queue empty</p>
+    <h2 class="mt-2 text-2xl font-semibold leading-8 text-zinc-950">No pending proposals.</h2>
+    <p class="mx-auto mt-3 max-w-md text-sm leading-6 text-zinc-600">
+      New candidate connections will appear here after ingestion and proposal generation complete.
+    </p>
+  </section>
+
+  {% if include_badge_update|default(false) %}
+    {% set pending_badge_oob = true %}
+    {% include "queue/_pending_badge.html" %}
+  {% endif %}
+</div>
