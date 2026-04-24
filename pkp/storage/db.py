@@ -18,6 +18,7 @@ from pkp.storage.models import (
     IngestionMetric,
     Job,
     Proposal,
+    ProposalWithDocuments,
     SearchResult,
 )
 
@@ -238,6 +239,13 @@ class Database:
             (status, limit),
         )
         return [self._row_to_job(row) for row in rows]
+
+    async def get_job(self, job_id: str) -> Job | None:
+        """Get a job by job_id."""
+        row = await self._fetch_one("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
+        if row is None:
+            return None
+        return self._row_to_job(row)
 
     async def claim_job(self, job_id: str) -> Job | None:
         """Claim a pending job for processing."""
@@ -499,6 +507,74 @@ class Database:
         )
         return [self._row_to_proposal(row) for row in rows]
 
+    async def get_proposal(self, proposal_id: str) -> Proposal | None:
+        """Get a proposal by proposal_id."""
+        row = await self._fetch_one(
+            "SELECT * FROM proposals WHERE proposal_id = ?",
+            (proposal_id,),
+        )
+        if row is None:
+            return None
+        return self._row_to_proposal(row)
+
+    async def get_proposals_with_documents_by_status(
+        self, status: str, limit: int = 50
+    ) -> list[ProposalWithDocuments]:
+        """Get proposals by status with display metadata for both documents."""
+        rows = await self._fetch_all(
+            """SELECT
+                p.proposal_id,
+                p.doc_a_sha256,
+                p.doc_b_sha256,
+                p.score,
+                p.rationale,
+                p.status,
+                p.created_at,
+                p.reviewed_at,
+                p.link_type,
+                doc_a.title AS doc_a_title,
+                doc_a.url AS doc_a_url,
+                doc_b.title AS doc_b_title,
+                doc_b.url AS doc_b_url
+            FROM proposals p
+            LEFT JOIN documents doc_a ON doc_a.sha256 = p.doc_a_sha256
+            LEFT JOIN documents doc_b ON doc_b.sha256 = p.doc_b_sha256
+            WHERE p.status = ?
+            ORDER BY p.created_at DESC
+            LIMIT ?""",
+            (status, limit),
+        )
+        return [self._row_to_proposal_with_documents(row) for row in rows]
+
+    async def get_proposal_with_documents(
+        self, proposal_id: str
+    ) -> ProposalWithDocuments | None:
+        """Get a proposal by proposal_id with display metadata for both documents."""
+        row = await self._fetch_one(
+            """SELECT
+                p.proposal_id,
+                p.doc_a_sha256,
+                p.doc_b_sha256,
+                p.score,
+                p.rationale,
+                p.status,
+                p.created_at,
+                p.reviewed_at,
+                p.link_type,
+                doc_a.title AS doc_a_title,
+                doc_a.url AS doc_a_url,
+                doc_b.title AS doc_b_title,
+                doc_b.url AS doc_b_url
+            FROM proposals p
+            LEFT JOIN documents doc_a ON doc_a.sha256 = p.doc_a_sha256
+            LEFT JOIN documents doc_b ON doc_b.sha256 = p.doc_b_sha256
+            WHERE p.proposal_id = ?""",
+            (proposal_id,),
+        )
+        if row is None:
+            return None
+        return self._row_to_proposal_with_documents(row)
+
     def _row_to_proposal(self, row: aiosqlite.Row) -> Proposal:
         """Convert a database row to a Proposal instance."""
         return Proposal(
@@ -515,6 +591,28 @@ class Database:
             link_type=row["link_type"],
         )
 
+    def _row_to_proposal_with_documents(
+        self, row: aiosqlite.Row
+    ) -> ProposalWithDocuments:
+        """Convert a joined proposal row to a ProposalWithDocuments instance."""
+        return ProposalWithDocuments(
+            proposal_id=row["proposal_id"],
+            doc_a_sha256=row["doc_a_sha256"],
+            doc_b_sha256=row["doc_b_sha256"],
+            score=row["score"],
+            rationale=row["rationale"],
+            status=row["status"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            reviewed_at=datetime.fromisoformat(row["reviewed_at"])
+            if row["reviewed_at"]
+            else None,
+            link_type=row["link_type"],
+            doc_a_title=row["doc_a_title"],
+            doc_a_url=row["doc_a_url"],
+            doc_b_title=row["doc_b_title"],
+            doc_b_url=row["doc_b_url"],
+        )
+
     async def update_proposal_status(
         self, proposal_id: str, status: str, reviewed_at: datetime | None = None
     ) -> None:
@@ -525,6 +623,58 @@ class Database:
         )
         assert self._conn is not None
         await self._conn.commit()
+
+    async def approve_proposal(
+        self, proposal_id: str, link_type: str | None, reviewed_at: datetime
+    ) -> bool:
+        """Approve a pending proposal, optionally updating its link type."""
+        if self._conn is None:
+            raise RuntimeError("Database not connected")
+
+        cursor = await self._conn.execute(
+            """UPDATE proposals
+            SET status = 'approved', reviewed_at = ?, link_type = COALESCE(?, link_type)
+            WHERE proposal_id = ? AND status = 'pending'""",
+            (reviewed_at.isoformat(), link_type, proposal_id),
+        )
+        await self._conn.commit()
+        rowcount = cursor.rowcount
+        await cursor.close()
+        return rowcount == 1
+
+    async def reject_proposal(
+        self, proposal_id: str, doc_a_sha256: str, doc_b_sha256: str
+    ) -> bool:
+        """Reject a pending proposal and record its pair atomically."""
+        if self._conn is None:
+            raise RuntimeError("Database not connected")
+
+        rejected_at = datetime.now(UTC).isoformat()
+        try:
+            await self._conn.execute("BEGIN")
+            cursor = await self._conn.execute(
+                """UPDATE proposals
+                SET status = 'rejected', reviewed_at = ?
+                WHERE proposal_id = ? AND status = 'pending'""",
+                (rejected_at, proposal_id),
+            )
+            rowcount = cursor.rowcount
+            await cursor.close()
+            if rowcount != 1:
+                await self._conn.rollback()
+                return False
+
+            await self._conn.execute(
+                """INSERT OR REPLACE INTO rejected_pairs
+                (doc_a_sha256, doc_b_sha256, rejected_at)
+                VALUES (?, ?, ?)""",
+                (doc_a_sha256, doc_b_sha256, rejected_at),
+            )
+            await self._conn.commit()
+            return True
+        except Exception:
+            await self._conn.rollback()
+            raise
 
     async def mark_document_indexed(self, sha256: str) -> None:
         """Mark a document as indexed."""

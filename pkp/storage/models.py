@@ -51,6 +51,25 @@ class Proposal:
 
 
 @dataclass
+class ProposalWithDocuments:
+    """Proposal record with display metadata for both documents."""
+
+    proposal_id: str
+    doc_a_sha256: str
+    doc_b_sha256: str
+    score: float
+    rationale: str | None
+    status: str
+    created_at: datetime
+    reviewed_at: datetime | None = None
+    link_type: str | None = None
+    doc_a_title: str | None = None
+    doc_a_url: str | None = None
+    doc_b_title: str | None = None
+    doc_b_url: str | None = None
+
+
+@dataclass
 class Job:
     """Job record from the jobs table."""
 
