@@ -12,12 +12,12 @@ from fastapi import FastAPI, Response
 from pydantic import BaseModel
 
 from pkp import __version__
+from pkp.api.deps import db_dependency, get_db
+from pkp.api.routes.ingest import router as ingest_router
+from pkp.api.routes.jobs import router as jobs_router
+from pkp.api.routes.proposals import router as proposals_router
 from pkp.api.worker import worker_loop
 from pkp.config import get_config
-from pkp.storage.db import (
-    Database,
-    get_database,
-)
 from pkp.storage.qdrant import (
     qdrant_available,
     search_documents_hybrid,
@@ -86,33 +86,6 @@ async def check_service(name: str, url: str) -> tuple[str, ServiceHealth]:
         return name, ServiceHealth(status="error", message=str(e)[:50])
 
 
-class DatabaseDependency:
-    """FastAPI dependency for database access."""
-
-    def __init__(self) -> None:
-        self._db: Database | None = None
-
-    async def __call__(self) -> Database:
-        """Get or create database connection."""
-        if self._db is None:
-            self._db = await get_database()
-        return self._db
-
-    async def close(self) -> None:
-        """Close database connection."""
-        if self._db:
-            await self._db.close()
-            self._db = None
-
-
-_db_dep = DatabaseDependency()
-
-
-async def _get_db() -> Database:
-    """FastAPI dependency for database injection."""
-    return await _db_dep()
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
@@ -121,7 +94,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     worker_task: asyncio.Task[None] | None = None
 
     try:
-        await _db_dep()
+        await db_dependency()
     except Exception as e:
         raise RuntimeError(f"Failed to initialize database: {e}") from e
 
@@ -134,7 +107,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             worker_task.cancel()
             with suppress(asyncio.CancelledError):
                 await worker_task
-        await _db_dep.close()
+        await db_dependency.close()
 
 
 def get_application() -> FastAPI:
@@ -145,6 +118,9 @@ def get_application() -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
+    app.include_router(proposals_router)
+    app.include_router(jobs_router)
+    app.include_router(ingest_router)
 
     return app
 
@@ -215,10 +191,10 @@ async def search(q: str, limit: int = 10) -> SearchResponse:
         if qdrant_available():
             results = await search_documents_hybrid(q, limit)
         else:
-            db = await _get_db()
+            db = await get_db()
             results = await db.search_documents(q, limit)
     except Exception:
-        db = await _get_db()
+        db = await get_db()
         results = await db.search_documents(q, limit)
 
     return SearchResponse(
