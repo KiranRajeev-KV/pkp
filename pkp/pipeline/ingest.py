@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from pkp.storage.db import Document, IngestionMetric, db_context
 if TYPE_CHECKING:
     from qdrant_client import QdrantClient
 
+logger = logging.getLogger(__name__)
 ProgressReporter = Callable[[str], None]
 
 
@@ -243,6 +245,26 @@ async def _finish_ingest(
             embedded_with=config.embedding_model,
         )
         await db.insert_document(doc)
+        if config.vault_path is not None and config.auto_vault_on_ingest:
+            try:
+                from pkp.vault.writer import VaultWriterError, create_document_note
+
+                note_path = create_document_note(config.vault_path, doc)
+                await db.mark_document_vault_path(doc.sha256, str(note_path))
+            except VaultWriterError as exc:
+                logger.warning(
+                    "vault note creation failed sha256=%s: %s",
+                    doc.sha256,
+                    exc,
+                )
+                reporter(f"Vault note creation failed for {doc.sha256[:16]}: {exc}")
+            except Exception as exc:
+                logger.warning(
+                    "vault note creation failed unexpectedly sha256=%s: %s",
+                    doc.sha256,
+                    exc,
+                )
+                reporter(f"Vault note creation failed for {doc.sha256[:16]}: {exc}")
 
         for idx, chunk in enumerate(chunked.chunks):
             chunk_record = DBChunk(
