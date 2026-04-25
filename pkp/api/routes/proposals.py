@@ -34,6 +34,7 @@ class ProposalResponse(BaseModel):
     doc_a_url: str | None
     doc_b_title: str | None
     doc_b_url: str | None
+    vault_warning: str | None = None
 
 
 class ProposalListResponse(BaseModel):
@@ -51,7 +52,9 @@ class ApproveProposalRequest(BaseModel):
     link_type: str | None = None
 
 
-def _proposal_response(proposal: ProposalWithDocuments) -> ProposalResponse:
+def _proposal_response(
+    proposal: ProposalWithDocuments, *, vault_warning: str | None = None
+) -> ProposalResponse:
     """Build an API response from a joined proposal record."""
     return ProposalResponse(
         proposal_id=proposal.proposal_id,
@@ -67,18 +70,22 @@ def _proposal_response(proposal: ProposalWithDocuments) -> ProposalResponse:
         doc_a_url=proposal.doc_a_url,
         doc_b_title=proposal.doc_b_title,
         doc_b_url=proposal.doc_b_url,
+        vault_warning=vault_warning,
     )
 
 
-async def _append_approved_connection(db: Database, proposal_id: str) -> bool:
-    """Append an approved proposal into doc_a's vault note, returning success."""
+async def _append_approved_connection(
+    db: Database, proposal_id: str
+) -> tuple[bool, str | None]:
+    """Append an approved proposal into doc_a's vault note."""
+    warning = "Connection approved - vault write failed, check logs"
     config = get_config()
     if config.vault_path is None:
         logger.warning(
             "vault connection append skipped proposal_id=%s: vault_path not configured",
             proposal_id,
         )
-        return False
+        return False, warning
 
     proposal = await db.get_proposal(proposal_id)
     if proposal is None:
@@ -86,7 +93,7 @@ async def _append_approved_connection(db: Database, proposal_id: str) -> bool:
             "vault connection append skipped proposal_id=%s: proposal missing",
             proposal_id,
         )
-        return False
+        return False, warning
 
     doc_a = await db.get_document(proposal.doc_a_sha256)
     doc_b = await db.get_document(proposal.doc_b_sha256)
@@ -97,27 +104,27 @@ async def _append_approved_connection(db: Database, proposal_id: str) -> bool:
             proposal.doc_a_sha256,
             proposal.doc_b_sha256,
         )
-        return False
+        return False, warning
 
     try:
         from pkp.vault.writer import VaultWriterError, append_connection
 
         append_connection(config.vault_path, doc_a, doc_b, proposal)
-        return True
+        return True, None
     except VaultWriterError as exc:
         logger.warning(
             "vault connection append failed proposal_id=%s: %s",
             proposal_id,
             exc,
         )
-        return False
+        return False, warning
     except Exception as exc:
         logger.warning(
             "vault connection append failed unexpectedly proposal_id=%s: %s",
             proposal_id,
             exc,
         )
-        return False
+        return False, warning
 
 
 @router.get("/proposals", response_model=ProposalListResponse)
@@ -168,12 +175,12 @@ async def approve_proposal(
         if not approved:
             raise HTTPException(status_code=409, detail="Proposal is not pending")
 
-        await _append_approved_connection(db, proposal_id)
+        _, vault_warning = await _append_approved_connection(db, proposal_id)
 
         updated = await db.get_proposal_with_documents(proposal_id)
         if updated is None:
             raise HTTPException(status_code=404, detail="Proposal not found")
-        return _proposal_response(updated)
+        return _proposal_response(updated, vault_warning=vault_warning)
 
 
 @router.post("/proposals/{proposal_id}/reject", response_model=ProposalResponse)
