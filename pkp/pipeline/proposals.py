@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from pkp.config import get_config
@@ -18,6 +19,17 @@ logger = logging.getLogger(__name__)
 _BODY_QUERY_CHARS = 500
 _FTS_QUERY_TOKEN_LIMIT = 20
 _MIN_QUERY_TOKEN_LENGTH = 2
+_PKP_FRONTMATTER_MARKER = 'pkp_version: "1"'
+_EXTRACTED_METADATA_FRONTMATTER_KEYS = {
+    "author",
+    "date",
+    "description",
+    "hostname",
+    "sitename",
+    "source",
+    "title",
+    "url",
+}
 
 
 async def generate_proposals(doc_sha256: str) -> int:
@@ -88,8 +100,8 @@ async def _generate_proposals(doc_sha256: str) -> int:
             if result.doc_sha256 == doc_sha256:
                 continue
 
-            score = _score_from_best_rank(result.best_rank)
-            if score < 0.1:
+            score = _score_search_result(result)
+            if score < config.proposal_min_score:
                 logger.info(
                     "proposal candidate skipped below threshold doc_sha256=%s candidate_sha256=%s score=%.4f",
                     doc_sha256,
@@ -144,7 +156,17 @@ async def _generate_proposals(doc_sha256: str) -> int:
 
 
 def _strip_leading_frontmatter(text: str) -> str:
-    """Remove only the first leading YAML frontmatter block."""
+    """Remove PKP frontmatter and a known extracted-metadata block when present."""
+    text = _strip_frontmatter_block_if(text, _is_pkp_frontmatter_block)
+    text = _strip_frontmatter_block_if(text, _is_extracted_metadata_frontmatter_block)
+    return text
+
+
+def _strip_frontmatter_block_if(
+    text: str,
+    predicate: Callable[[str], bool],
+) -> str:
+    """Remove one leading frontmatter block when the block matches a predicate."""
     if not text.startswith("---\n"):
         return text
 
@@ -152,7 +174,40 @@ def _strip_leading_frontmatter(text: str) -> str:
     if end_index == -1:
         return text
 
+    block = text[: end_index + 5]
+    if not predicate(block):
+        return text
+
     return text[end_index + 5 :].lstrip("\n")
+
+
+def _frontmatter_keys(block: str) -> set[str]:
+    """Extract YAML-like top-level keys from a frontmatter block."""
+    keys: set[str] = set()
+    for line in block.splitlines()[1:-1]:
+        stripped = line.strip()
+        if not stripped or ":" not in stripped:
+            continue
+        key, _, _value = stripped.partition(":")
+        key = key.strip()
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _is_pkp_frontmatter_block(block: str) -> bool:
+    """Return True when the block is PKP's injected leading frontmatter."""
+    return _PKP_FRONTMATTER_MARKER in block
+
+
+def _is_extracted_metadata_frontmatter_block(block: str) -> bool:
+    """Return True for the known extractor-inserted metadata frontmatter shape."""
+    keys = _frontmatter_keys(block)
+    if not keys:
+        return False
+    if not keys.issubset(_EXTRACTED_METADATA_FRONTMATTER_KEYS):
+        return False
+    return "url" in keys or "hostname" in keys or "sitename" in keys
 
 
 def _build_query(title: str, normalized_text: str | None) -> str:
@@ -187,8 +242,15 @@ def _build_fts_query(raw_query: str) -> str:
 
 
 def _score_from_best_rank(best_rank: float) -> float:
-    """Transform a search rank into a higher-is-better proposal score."""
+    """Transform an FTS search rank into a higher-is-better proposal score."""
     return 1.0 / (1.0 + abs(best_rank))
+
+
+def _score_search_result(result: SearchResult) -> float:
+    """Return the proposal score using raw Qdrant score when available."""
+    if result.raw_score is not None:
+        return result.raw_score
+    return _score_from_best_rank(result.best_rank)
 
 
 def _build_rationale(candidate_title: str, score: float) -> str:
