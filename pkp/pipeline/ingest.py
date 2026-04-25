@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -60,6 +61,84 @@ class RebuildIndexResult:
 
     total_upserted: int
     total_documents: int
+
+
+@dataclass
+class QdrantIndexingResult:
+    """Summary of one Qdrant indexing operation."""
+
+    indexed_chunks: int
+    citation_chunks_skipped: int
+
+
+_CITATION_CHUNK_THRESHOLD = 0.50
+_CITATION_FILTER_NOTE = (
+    "Citation chunk filtering is now active. Run 'pkp rebuild-index --all' to "
+    "remove citation chunks from existing Qdrant collections."
+)
+_CITATION_CHUNK_PATTERNS = (
+    re.compile(
+        r"\[(?:doi|arxiv|bibcode|pmid|pmc|issn|isbn|s2cid|oclc|jstor|hdl)\]"
+        r"\(https://en\.wikipedia\.org/wiki/[^)]+_\(identifier\)\)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\[\^.*?\]\(https://en\.wikipedia\.org#cite_(?:ref|note)[^)]+\)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\[\[\d+\]\]\(https://en\.wikipedia\.org#cite_note[^)]+\)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"10\.\d{4,9}/[^\s)\]>]+", re.IGNORECASE),
+    re.compile(
+        r"https?://(?:doi\.org|arxiv\.org/abs|ui\.adsabs\.harvard\.edu/abs|"
+        r"pubmed\.ncbi\.nlm\.nih\.gov|api\.semanticscholar\.org/CorpusID:?|"
+        r"search\.worldcat\.org/oclc/|www\.jstor\.org/stable/|hdl\.handle\.net/|"
+        r"www\.ncbi\.nlm\.nih\.gov/pmc/articles/|science\.org/doi/)[^\s)\]]*",
+        re.IGNORECASE,
+    ),
+    re.compile(r"Special:BookSources/[^\s)\]]+", re.IGNORECASE),
+    re.compile(r"en\.wikipedia\.org/wiki/[^\s)\]]+_\(identifier\)", re.IGNORECASE),
+    re.compile(
+        r"\b(?:S2CID|OCLC|PMID|JSTOR|ISSN|ISBN|PMC|Bibcode|arXiv|doi|hdl)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b\d{4}\.\d{4,5}(?:v\d+)?\b"),
+)
+
+
+def _citation_match_ratio(text: str) -> float:
+    """Return the matched-character ratio for citation-style patterns."""
+    if not text:
+        return 0.0
+
+    spans: list[tuple[int, int]] = []
+    for pattern in _CITATION_CHUNK_PATTERNS:
+        for match in pattern.finditer(text):
+            spans.append((match.start(), match.end()))
+
+    if not spans:
+        return 0.0
+
+    spans.sort()
+    merged_spans: list[tuple[int, int]] = []
+    start, end = spans[0]
+    for next_start, next_end in spans[1:]:
+        if next_start <= end:
+            end = max(end, next_end)
+            continue
+        merged_spans.append((start, end))
+        start, end = next_start, next_end
+    merged_spans.append((start, end))
+
+    matched_chars = sum(span_end - span_start for span_start, span_end in merged_spans)
+    return matched_chars / len(text)
+
+
+def is_citation_chunk(text: str, threshold: float = _CITATION_CHUNK_THRESHOLD) -> bool:
+    """Return True when a chunk is predominantly reference/citation content."""
+    return _citation_match_ratio(text) > threshold
 
 
 async def ingest_url(
@@ -162,6 +241,7 @@ async def rebuild_index(
         filter_doc_type=filter_doc_type,
         reporter=reporter,
     )
+    reporter(_CITATION_FILTER_NOTE)
     return RebuildIndexResult(total_upserted=total_upserted, total_documents=total_docs)
 
 
@@ -292,7 +372,7 @@ async def _finish_ingest(
         )
         await db.insert_metric(metric)
 
-        indexed = await _upsert_to_qdrant(
+        indexing_result = await _upsert_to_qdrant(
             sha256=extracted.sha256,
             doc_type=extracted.doc_type,
             title=extracted.title,
@@ -300,8 +380,17 @@ async def _finish_ingest(
             chunks=chunked.chunks,
             reporter=reporter,
         )
-        if indexed:
+        if indexing_result is not None and indexing_result.indexed_chunks > 0:
             await db.mark_document_indexed(extracted.sha256)
+            reporter(
+                f"Indexed {indexing_result.indexed_chunks} chunks "
+                f"({indexing_result.citation_chunks_skipped} citation chunks skipped)"
+            )
+            reporter(_CITATION_FILTER_NOTE)
+        elif indexing_result is not None:
+            reporter(
+                f"Indexed 0 chunks ({indexing_result.citation_chunks_skipped} citation chunks skipped)"
+            )
 
     reporter(f"Archived: {extracted.sha256[:16]} at {doc_dir}")
 
@@ -325,25 +414,33 @@ async def _upsert_to_qdrant(
     url: str | None,
     chunks: list[Chunk],
     reporter: ProgressReporter,
-) -> bool:
+) -> QdrantIndexingResult | None:
     """Embed chunks and upsert them into Qdrant."""
     from pkp.embedder import get_embedder
     from pkp.storage.qdrant import ensure_collection, qdrant_available, upsert_vectors
 
     if not qdrant_available():
         reporter(f"Vector index unavailable for {sha256[:16]}; skipping indexing")
-        return False
+        return None
 
     try:
         ensure_collection(doc_type)
     except Exception as exc:
         reporter(f"Vector collection setup failed for {doc_type}: {exc}")
-        return False
+        return None
+
+    indexable_chunks = [chunk for chunk in chunks if not is_citation_chunk(chunk.text)]
+    skipped_chunks = len(chunks) - len(indexable_chunks)
+    if not indexable_chunks:
+        return QdrantIndexingResult(
+            indexed_chunks=0,
+            citation_chunks_skipped=skipped_chunks,
+        )
 
     for attempt in range(1, 3):
         try:
             embedder = get_embedder()
-            chunk_texts = [chunk.text for chunk in chunks]
+            chunk_texts = [chunk.text for chunk in indexable_chunks]
             embeddings = embedder.embed_chunks(chunk_texts)
 
             vectors: list[list[float]] = []
@@ -351,7 +448,7 @@ async def _upsert_to_qdrant(
             payloads: list[dict[str, Any]] = []
 
             for idx, emb in enumerate(embeddings):
-                chunk = chunks[idx]
+                chunk = indexable_chunks[idx]
                 payloads.append(
                     {
                         "chunk_id": chunk.chunk_id,
@@ -370,7 +467,7 @@ async def _upsert_to_qdrant(
                 indices, values = embedder.tokens_to_indices(chunk.text, emb.sparse[0])
                 sparse_data.append((indices, values))
 
-            chunk_ids = [chunk.chunk_id for chunk in chunks]
+            chunk_ids = [chunk.chunk_id for chunk in indexable_chunks]
             upsert_vectors(
                 doc_type=doc_type,
                 chunk_ids=chunk_ids,
@@ -378,15 +475,18 @@ async def _upsert_to_qdrant(
                 sparse_data=sparse_data,
                 payloads=payloads,
             )
-            return True
+            return QdrantIndexingResult(
+                indexed_chunks=len(indexable_chunks),
+                citation_chunks_skipped=skipped_chunks,
+            )
         except Exception as exc:
             if attempt == 1:
                 reporter(f"Vector indexing failed for {sha256[:16]} (retrying): {exc}")
                 continue
             reporter(f"Vector indexing failed for {sha256[:16]}: {exc}")
-            return False
+            return None
 
-    return False
+    return None
 
 
 async def _repair_unindexed_document(sha256: str, reporter: ProgressReporter) -> None:
@@ -401,8 +501,10 @@ async def _repair_unindexed_document(sha256: str, reporter: ProgressReporter) ->
     if indexed_chunk_count is None:
         return
 
-    async with db_context() as db:
-        await db.mark_document_indexed(sha256)
+    if indexed_chunk_count > 0:
+        async with db_context() as db:
+            await db.mark_document_indexed(sha256)
+        reporter(_CITATION_FILTER_NOTE)
 
 
 async def _index_existing_document(
@@ -420,41 +522,54 @@ async def _index_existing_document(
         reporter(f"Skipping {doc.sha256[:16]}: no archived chunks")
         return None
 
-    success = await _upsert_archived_chunks(
+    indexing_result = await _upsert_archived_chunks(
         doc=doc,
         chunks=chunks,
         reporter=reporter,
     )
-    if not success:
+    if indexing_result is None:
         return None
 
-    reporter(f"Indexed {doc.sha256[:16]}: {len(chunks)} chunks")
-    return len(chunks)
+    reporter(
+        f"Indexed {doc.sha256[:16]}: {indexing_result.indexed_chunks} chunks "
+        f"({indexing_result.citation_chunks_skipped} citation chunks skipped)"
+    )
+    return indexing_result.indexed_chunks
 
 
 async def _upsert_archived_chunks(
     doc: Document,
     chunks: list[dict[str, Any]],
     reporter: ProgressReporter,
-) -> bool:
+) -> QdrantIndexingResult | None:
     """Embed archived chunks and upsert them into Qdrant."""
     from pkp.embedder import get_embedder
     from pkp.storage.qdrant import ensure_collection, qdrant_available, upsert_vectors
 
     if not qdrant_available():
         reporter(f"Vector index unavailable for {doc.sha256[:16]}; skipping indexing")
-        return False
+        return None
 
     try:
         ensure_collection(doc.doc_type)
     except Exception as exc:
         reporter(f"Vector collection setup failed for {doc.doc_type}: {exc}")
-        return False
+        return None
+
+    indexable_chunks = [
+        chunk for chunk in chunks if not is_citation_chunk(chunk["content"])
+    ]
+    skipped_chunks = len(chunks) - len(indexable_chunks)
+    if not indexable_chunks:
+        return QdrantIndexingResult(
+            indexed_chunks=0,
+            citation_chunks_skipped=skipped_chunks,
+        )
 
     for attempt in range(1, 3):
         try:
             embedder = get_embedder()
-            chunk_texts = [chunk["content"] for chunk in chunks]
+            chunk_texts = [chunk["content"] for chunk in indexable_chunks]
             embeddings = embedder.embed_chunks(chunk_texts)
 
             vectors: list[list[float]] = []
@@ -462,7 +577,7 @@ async def _upsert_archived_chunks(
             payloads: list[dict[str, Any]] = []
 
             for idx, emb in enumerate(embeddings):
-                chunk = chunks[idx]
+                chunk = indexable_chunks[idx]
                 payloads.append(
                     {
                         "chunk_id": chunk["chunk_id"],
@@ -483,7 +598,7 @@ async def _upsert_archived_chunks(
                 )
                 sparse_data.append((indices, values))
 
-            chunk_ids = [chunk["chunk_id"] for chunk in chunks]
+            chunk_ids = [chunk["chunk_id"] for chunk in indexable_chunks]
             upsert_vectors(
                 doc_type=doc.doc_type,
                 chunk_ids=chunk_ids,
@@ -491,7 +606,10 @@ async def _upsert_archived_chunks(
                 sparse_data=sparse_data,
                 payloads=payloads,
             )
-            return True
+            return QdrantIndexingResult(
+                indexed_chunks=len(indexable_chunks),
+                citation_chunks_skipped=skipped_chunks,
+            )
         except Exception as exc:
             if attempt == 1:
                 reporter(
@@ -499,9 +617,9 @@ async def _upsert_archived_chunks(
                 )
                 continue
             reporter(f"Vector indexing failed for {doc.sha256[:16]}: {exc}")
-            return False
+            return None
 
-    return False
+    return None
 
 
 async def _setup_collections(
