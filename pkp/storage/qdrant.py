@@ -335,6 +335,7 @@ async def search_qdrant(
                     url=point.payload.get("url"),
                     match_count=1,
                     best_rank=-point.score,
+                    raw_score=point.score,
                 )
 
         return list(seen_docs.values())[:limit]
@@ -389,6 +390,7 @@ async def search_qdrant(
                     url=point.payload.get("url"),
                     match_count=1,
                     best_rank=-point.score,
+                    raw_score=point.score,
                 )
 
     sorted_results = sorted(

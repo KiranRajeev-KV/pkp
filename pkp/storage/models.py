@@ -92,6 +92,7 @@ class SearchResult:
     url: str | None
     match_count: int
     best_rank: float
+    raw_score: float | None = None
 
 
 @dataclass

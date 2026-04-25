@@ -47,6 +47,7 @@ class PKPConfig:
     fallback_word_count_threshold: int = 150
 
     proposal_top_n: int = 10
+    proposal_min_score: float = 0.15
     reranker: str = "none"
     auto_vault_on_ingest: bool = True
 
@@ -96,6 +97,7 @@ class PKPConfig:
             "crawl4ai_headless": self.crawl4ai_headless,
             "fallback_word_count_threshold": self.fallback_word_count_threshold,
             "proposal_top_n": self.proposal_top_n,
+            "proposal_min_score": self.proposal_min_score,
             "reranker": self.reranker,
             "auto_vault_on_ingest": self.auto_vault_on_ingest,
         }
@@ -130,6 +132,7 @@ class PKPConfig:
                 "fallback_word_count_threshold", 150
             ),
             proposal_top_n=data.get("proposal_top_n", 10),
+            proposal_min_score=data.get("proposal_min_score", 0.15),
             reranker=data.get("reranker", "none"),
             auto_vault_on_ingest=data.get("auto_vault_on_ingest", True),
         )
