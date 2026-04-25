@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -13,10 +14,12 @@ from fastapi.templating import Jinja2Templates
 
 from pkp import __version__
 from pkp.api.deps import get_db
+from pkp.config import get_config
 from pkp.storage.db import Database
 from pkp.storage.models import ProposalWithDocuments
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
@@ -88,6 +91,56 @@ async def _pending_proposals(
 def _toast_header(message: str) -> dict[str, str]:
     """Build an HTMX trigger header for toast notifications."""
     return {"HX-Trigger": json.dumps({"queue:toast": {"message": message}})}
+
+
+async def _append_approved_connection(db: Database, proposal_id: str) -> bool:
+    """Append an approved proposal into doc_a's vault note, returning success."""
+    config = get_config()
+    if config.vault_path is None:
+        logger.warning(
+            "vault connection append skipped proposal_id=%s: vault_path not configured",
+            proposal_id,
+        )
+        return False
+
+    proposal = await db.get_proposal(proposal_id)
+    if proposal is None:
+        logger.warning(
+            "vault connection append skipped proposal_id=%s: proposal missing",
+            proposal_id,
+        )
+        return False
+
+    doc_a = await db.get_document(proposal.doc_a_sha256)
+    doc_b = await db.get_document(proposal.doc_b_sha256)
+    if doc_a is None or doc_b is None:
+        logger.warning(
+            "vault connection append skipped proposal_id=%s: document missing doc_a=%s doc_b=%s",
+            proposal_id,
+            proposal.doc_a_sha256,
+            proposal.doc_b_sha256,
+        )
+        return False
+
+    try:
+        from pkp.vault.writer import VaultWriterError, append_connection
+
+        append_connection(config.vault_path, doc_a, doc_b, proposal)
+        return True
+    except VaultWriterError as exc:
+        logger.warning(
+            "vault connection append failed proposal_id=%s: %s",
+            proposal_id,
+            exc,
+        )
+        return False
+    except Exception as exc:
+        logger.warning(
+            "vault connection append failed unexpectedly proposal_id=%s: %s",
+            proposal_id,
+            exc,
+        )
+        return False
 
 
 async def _render_proposal_slot(
@@ -192,6 +245,7 @@ async def bulk_approve_queue_proposals(
     reviewed_at = datetime.now(UTC)
 
     approved_count = 0
+    vault_failure_count = 0
     for proposal_id in proposal_ids:
         proposal = await db.get_proposal(proposal_id)
         if proposal is None or proposal.status != "pending":
@@ -199,11 +253,19 @@ async def bulk_approve_queue_proposals(
         approved = await db.approve_proposal(proposal_id, None, reviewed_at)
         if approved:
             approved_count += 1
+            appended = await _append_approved_connection(db, proposal_id)
+            if not appended:
+                vault_failure_count += 1
 
     proposals = await _pending_proposals(db)
     pending_count = await _pending_count(db)
     message = "Connection approved and saved"
-    if approved_count != 1:
+    if vault_failure_count > 0:
+        failure_label = "vault write failed"
+        if vault_failure_count != 1:
+            failure_label = "vault writes failed"
+        message = f"{approved_count} approved, {vault_failure_count} {failure_label} - check logs"
+    elif approved_count != 1:
         message = f"{approved_count} connections approved and saved"
     return templates.TemplateResponse(
         request,
@@ -281,6 +343,8 @@ async def approve_queue_proposal(
 
     next_pending = await _next_pending_proposal(db)
     headers = _toast_header("Connection approved and saved")
+    if not await _append_approved_connection(db, proposal_id):
+        headers = _toast_header("Connection approved - vault write failed, check logs")
     return await _render_proposal_slot(request, db, next_pending, headers)
 
 
