@@ -48,6 +48,7 @@ class PKPConfig:
 
     proposal_top_n: int = 10
     reranker: str = "none"
+    auto_vault_on_ingest: bool = True
 
     def __post_init__(self) -> None:
         """Derive default paths from data_dir."""
@@ -96,6 +97,7 @@ class PKPConfig:
             "fallback_word_count_threshold": self.fallback_word_count_threshold,
             "proposal_top_n": self.proposal_top_n,
             "reranker": self.reranker,
+            "auto_vault_on_ingest": self.auto_vault_on_ingest,
         }
 
     @classmethod
@@ -129,6 +131,7 @@ class PKPConfig:
             ),
             proposal_top_n=data.get("proposal_top_n", 10),
             reranker=data.get("reranker", "none"),
+            auto_vault_on_ingest=data.get("auto_vault_on_ingest", True),
         )
 
 
