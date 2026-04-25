@@ -339,6 +339,51 @@ def status() -> None:
     click.echo(f"Documents: {len(documents)}")
 
 
+@main.command(name="backfill-vault")
+def backfill_vault() -> None:
+    """Create missing vault notes for documents without a stored vault path."""
+    failed = asyncio.run(_do_backfill_vault())
+    if failed > 0:
+        sys.exit(1)
+
+
+async def _do_backfill_vault() -> int:
+    """Backfill vault notes for documents whose SQLite vault_path is null."""
+    config = get_config()
+    if config.vault_path is None:
+        click.echo("Backfill error: vault path not configured", err=True)
+        return 1
+
+    from pkp.vault.writer import VaultWriterError, create_document_note
+
+    created = 0
+    skipped = 0
+    failed = 0
+
+    async with db_context() as db:
+        documents = await db.get_all_documents()
+        for doc in documents:
+            if doc.vault_path is not None:
+                continue
+
+            try:
+                note_path = create_document_note(config.vault_path, doc)
+                await db.mark_document_vault_path(doc.sha256, str(note_path))
+                created += 1
+                click.echo(f"✓ Created: {doc.title}")
+            except VaultWriterError as exc:
+                failed += 1
+                click.echo(f"✗ Failed: {doc.title} — {exc}", err=True)
+            except Exception as exc:
+                failed += 1
+                click.echo(f"✗ Failed: {doc.title} — {exc}", err=True)
+
+    click.echo(
+        f"Backfill complete: {created} created, {skipped} skipped, {failed} failed."
+    )
+    return failed
+
+
 @main.command()
 @click.option(
     "--all",
