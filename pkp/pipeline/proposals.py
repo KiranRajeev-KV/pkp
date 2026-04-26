@@ -157,9 +157,21 @@ async def _generate_proposals(doc_sha256: str) -> int:
 
 def _strip_leading_frontmatter(text: str) -> str:
     """Remove PKP frontmatter and a known extracted-metadata block when present."""
-    text = _strip_frontmatter_block_if(text, _is_pkp_frontmatter_block)
-    text = _strip_frontmatter_block_if(text, _is_extracted_metadata_frontmatter_block)
-    return text
+    while True:
+        updated = _strip_frontmatter_block_if(text, _is_pkp_frontmatter_block)
+        if updated != text:
+            text = updated
+            continue
+
+        updated = _strip_frontmatter_block_if(
+            text,
+            _is_extracted_metadata_frontmatter_block,
+        )
+        if updated != text:
+            text = updated
+            continue
+
+        return text
 
 
 def _strip_frontmatter_block_if(
