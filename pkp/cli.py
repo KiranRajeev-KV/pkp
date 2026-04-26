@@ -12,8 +12,10 @@ import httpx
 
 from pkp import __version__
 from pkp.config import get_config, load_config, save_config
+from pkp.pipeline.extractor import extract_arxiv_id
 from pkp.pipeline.ingest import (
     ExtractionError,
+    fetch_arxiv_metadata,
 )
 from pkp.pipeline.ingest import (
     ingest_pdf as run_ingest_pdf,
@@ -337,6 +339,82 @@ def status() -> None:
     archive = ArchiveManager(config.archive_path)
     documents = archive.list_all_documents()
     click.echo(f"Documents: {len(documents)}")
+
+
+@main.command("enrich-titles")
+def enrich_titles() -> None:
+    """Enrich PDF titles from arXiv metadata."""
+    asyncio.run(_enrich_titles())
+
+
+async def _enrich_titles() -> None:
+    """Fetch arXiv metadata for archived PDFs and update titles."""
+    config = get_config()
+    if config.archive_path is None:
+        click.echo("Archive path not configured", err=True)
+        sys.exit(1)
+
+    archive = ArchiveManager(config.archive_path)
+    updated = 0
+    no_id = 0
+    failed = 0
+
+    async with db_context() as db:
+        documents = await db.get_all_documents()
+        pdf_documents = [doc for doc in documents if doc.doc_type == "pdf"]
+
+        for doc in pdf_documents:
+            archived = archive.get_archived_document(doc.sha256)
+            if archived is None:
+                failed += 1
+                click.echo(f"✗ Enrichment failed: {doc.title} — archive not found")
+                continue
+
+            candidates = [
+                doc.title,
+                archived.metadata.title,
+                doc.archive_path,
+            ]
+            if archived.metadata.source_file:
+                candidates.append(Path(archived.metadata.source_file).stem)
+
+            arxiv_id = None
+            for candidate in candidates:
+                arxiv_id = extract_arxiv_id(candidate)
+                if arxiv_id is not None:
+                    break
+
+            if arxiv_id is None:
+                no_id += 1
+                click.echo(f"✗ No arXiv ID found: {doc.title}")
+                continue
+
+            metadata = await fetch_arxiv_metadata(arxiv_id)
+            if metadata is None:
+                failed += 1
+                click.echo(
+                    f"✗ Enrichment failed: {doc.title} — metadata unavailable for {arxiv_id}"
+                )
+                continue
+
+            old_title = doc.title
+            new_title = metadata["title"]
+            await db.update_document_title(doc.sha256, new_title)
+
+            archived.metadata.title = new_title
+            archived.metadata.arxiv_id = metadata["arxiv_id"]
+            archived.metadata.arxiv_authors = metadata["authors"]
+            archived.metadata.arxiv_abstract = metadata["abstract"]
+            archive.write_metadata(doc.sha256, archived.metadata)
+
+            updated += 1
+            click.echo(f"✓ Updated: {old_title} → {new_title}")
+
+    click.echo("")
+    click.echo(f"Summary: {updated} updated, {no_id} with no arXiv ID, {failed} failed")
+    click.echo(
+        "Run pkp rebuild-index --all and re-enqueue generate_proposals jobs to refresh proposal rationales with corrected titles."
+    )
 
 
 @main.command(name="backfill-vault")
