@@ -88,3 +88,6 @@ skips = ["B101", "B110", "B112", "B615"]
 [tool.radon]
 exclude = ["tests", ".cache"]
 cc_min = "C"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D103"]
