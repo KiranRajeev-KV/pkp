@@ -223,6 +223,19 @@ class Database:
         assert self._conn is not None
         await self._conn.commit()
 
+    async def update_document_title(self, sha256: str, title: str) -> None:
+        """Update the stored title for one document."""
+        await self._exec(
+            "UPDATE documents SET title = ? WHERE sha256 = ?",
+            (title, sha256),
+        )
+        await self._exec(
+            "UPDATE chunks_fts SET title = ? WHERE doc_sha256 = ?",
+            (title, sha256),
+        )
+        assert self._conn is not None
+        await self._conn.commit()
+
     def _row_to_document(self, row: aiosqlite.Row) -> Document:
         """Convert a database row to a Document instance."""
         tags = []
