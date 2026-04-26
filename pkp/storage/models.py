@@ -46,6 +46,8 @@ class Proposal:
     rationale: str | None
     status: str
     created_at: datetime
+    passage_a: str | None = None
+    passage_b: str | None = None
     reviewed_at: datetime | None = None
     link_type: str | None = None
 
@@ -61,6 +63,8 @@ class ProposalWithDocuments:
     rationale: str | None
     status: str
     created_at: datetime
+    passage_a: str | None = None
+    passage_b: str | None = None
     reviewed_at: datetime | None = None
     link_type: str | None = None
     doc_a_title: str | None = None

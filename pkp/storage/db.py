@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS proposals (
     doc_b_sha256 TEXT NOT NULL,
     score REAL NOT NULL,
     rationale TEXT,
+    passage_a TEXT,
+    passage_b TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL,
     reviewed_at TEXT,
@@ -115,7 +117,10 @@ CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_sha256);
 CREATE INDEX IF NOT EXISTS idx_metrics_doc ON ingestion_metrics(doc_sha256);
 """
 
-MIGRATIONS: list[str] = []
+MIGRATIONS: list[str] = [
+    "ALTER TABLE proposals ADD COLUMN passage_a TEXT",
+    "ALTER TABLE proposals ADD COLUMN passage_b TEXT",
+]
 
 
 class Database:
@@ -135,6 +140,13 @@ class Database:
         statements = [s.strip() for s in SCHEMA.split(";") if s.strip()]
         for stmt in statements:
             await self._conn.execute(stmt)
+
+        for migration in MIGRATIONS:
+            try:
+                await self._conn.execute(migration)
+            except aiosqlite.OperationalError as exc:
+                if "duplicate column name" not in str(exc).casefold():
+                    raise
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -444,14 +456,16 @@ class Database:
         """Insert a new proposal."""
         await self._exec(
             """INSERT OR REPLACE INTO proposals
-            (proposal_id, doc_a_sha256, doc_b_sha256, score, rationale, status, created_at, reviewed_at, link_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (proposal_id, doc_a_sha256, doc_b_sha256, score, rationale, passage_a, passage_b, status, created_at, reviewed_at, link_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 proposal.proposal_id,
                 proposal.doc_a_sha256,
                 proposal.doc_b_sha256,
                 proposal.score,
                 proposal.rationale,
+                proposal.passage_a,
+                proposal.passage_b,
                 proposal.status,
                 proposal.created_at.isoformat(),
                 proposal.reviewed_at.isoformat() if proposal.reviewed_at else None,
@@ -528,6 +542,8 @@ class Database:
                 p.doc_b_sha256,
                 p.score,
                 p.rationale,
+                p.passage_a,
+                p.passage_b,
                 p.status,
                 p.created_at,
                 p.reviewed_at,
@@ -557,6 +573,8 @@ class Database:
                 p.doc_b_sha256,
                 p.score,
                 p.rationale,
+                p.passage_a,
+                p.passage_b,
                 p.status,
                 p.created_at,
                 p.reviewed_at,
@@ -583,6 +601,8 @@ class Database:
             doc_b_sha256=row["doc_b_sha256"],
             score=row["score"],
             rationale=row["rationale"],
+            passage_a=row["passage_a"],
+            passage_b=row["passage_b"],
             status=row["status"],
             created_at=datetime.fromisoformat(row["created_at"]),
             reviewed_at=datetime.fromisoformat(row["reviewed_at"])
@@ -601,6 +621,8 @@ class Database:
             doc_b_sha256=row["doc_b_sha256"],
             score=row["score"],
             rationale=row["rationale"],
+            passage_a=row["passage_a"],
+            passage_b=row["passage_b"],
             status=row["status"],
             created_at=datetime.fromisoformat(row["created_at"]),
             reviewed_at=datetime.fromisoformat(row["reviewed_at"])

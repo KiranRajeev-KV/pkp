@@ -59,6 +59,40 @@
       <p class="mt-2 text-sm leading-6 text-zinc-700">
         {{ proposal.rationale or "No rationale was generated for this proposal." }}
       </p>
+
+      {% if proposal.passage_a %}
+        <div class="mt-4 rounded-md border-l-2 border-zinc-200 bg-zinc-50 px-4 py-3">
+          <p class="text-[11px] font-medium uppercase tracking-wide text-zinc-500">Source passage</p>
+          <p class="mt-2 text-sm leading-6 text-zinc-600">
+            "{{ proposal.passage_a[:300] }}{% if proposal.passage_a|length > 300 %}...{% endif %}"
+          </p>
+          {% if proposal.passage_a|length > 300 %}
+            <details class="mt-2">
+              <summary class="cursor-pointer text-xs font-medium text-zinc-500 hover:text-zinc-700">Show full passage</summary>
+              <p class="mt-2 whitespace-pre-wrap text-sm leading-6 text-zinc-600">
+                {{ proposal.passage_a }}
+              </p>
+            </details>
+          {% endif %}
+        </div>
+      {% endif %}
+
+      {% if proposal.passage_b %}
+        <div class="mt-4 rounded-md border-l-2 border-zinc-200 bg-zinc-50 px-4 py-3">
+          <p class="text-[11px] font-medium uppercase tracking-wide text-zinc-500">Related passage</p>
+          <p class="mt-2 text-sm leading-6 text-zinc-600">
+            "{{ proposal.passage_b[:300] }}{% if proposal.passage_b|length > 300 %}...{% endif %}"
+          </p>
+          {% if proposal.passage_b|length > 300 %}
+            <details class="mt-2">
+              <summary class="cursor-pointer text-xs font-medium text-zinc-500 hover:text-zinc-700">Show full passage</summary>
+              <p class="mt-2 whitespace-pre-wrap text-sm leading-6 text-zinc-600">
+                {{ proposal.passage_b }}
+              </p>
+            </details>
+          {% endif %}
+        </div>
+      {% endif %}
     </div>
 
     <div class="mt-5 border-t border-zinc-200 pt-5">

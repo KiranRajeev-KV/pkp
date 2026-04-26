@@ -26,6 +26,8 @@ class ProposalResponse(BaseModel):
     doc_b_sha256: str
     score: float
     rationale: str | None
+    passage_a: str | None
+    passage_b: str | None
     status: str
     created_at: datetime
     reviewed_at: datetime | None
@@ -62,6 +64,8 @@ def _proposal_response(
         doc_b_sha256=proposal.doc_b_sha256,
         score=proposal.score,
         rationale=proposal.rationale,
+        passage_a=proposal.passage_a,
+        passage_b=proposal.passage_b,
         status=proposal.status,
         created_at=proposal.created_at,
         reviewed_at=proposal.reviewed_at,

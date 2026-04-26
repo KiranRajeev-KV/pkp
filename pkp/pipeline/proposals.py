@@ -11,8 +11,12 @@ from datetime import UTC, datetime
 from pkp.config import get_config
 from pkp.storage.archive import ArchiveManager
 from pkp.storage.db import db_context
-from pkp.storage.models import Proposal, SearchResult
-from pkp.storage.qdrant import qdrant_available, search_documents_hybrid
+from pkp.storage.models import Document, Proposal, SearchResult
+from pkp.storage.qdrant import (
+    qdrant_available,
+    search_documents_hybrid,
+    search_top_passage_for_document,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +130,22 @@ async def _generate_proposals(doc_sha256: str) -> int:
                 )
                 continue
 
+            candidate_doc = await db.get_document(result.doc_sha256)
+            if candidate_doc is None:
+                logger.warning(
+                    "proposal candidate document missing doc_a_sha256=%s doc_b_sha256=%s",
+                    doc_sha256,
+                    result.doc_sha256,
+                )
+
+            passage_a, passage_b = await _retrieve_passage_evidence(
+                source_doc=source_doc,
+                source_query=raw_query,
+                candidate_doc=candidate_doc,
+                archive=archive,
+                qdrant_is_available=qdrant_is_available,
+            )
+
             proposal = Proposal(
                 proposal_id=_make_proposal_id(),
                 doc_a_sha256=doc_sha256,
@@ -134,6 +154,8 @@ async def _generate_proposals(doc_sha256: str) -> int:
                 rationale=_build_rationale(result.title, score),
                 status="pending",
                 created_at=datetime.now(UTC),
+                passage_a=passage_a,
+                passage_b=passage_b,
                 reviewed_at=None,
                 link_type="related",
             )
@@ -235,6 +257,12 @@ def _build_query(title: str, normalized_text: str | None) -> str:
     return f"{title.strip()}\n\n{body_preview}"
 
 
+def _build_document_query(doc: Document, archive: ArchiveManager) -> str:
+    """Build a retrieval query for one document using archived normalized text."""
+    normalized_text = archive.read_normalized(doc.sha256)
+    return _build_query(doc.title, normalized_text)
+
+
 def _build_fts_query(raw_query: str) -> str:
     """Convert raw query text into an FTS-safe OR query."""
     query_terms: list[str] = []
@@ -273,6 +301,52 @@ def _build_rationale(candidate_title: str, score: float) -> str:
 def _make_proposal_id() -> str:
     """Create a proposal identifier using the existing short UUID pattern."""
     return f"proposal-{uuid.uuid4().hex[:8]}"
+
+
+async def _retrieve_passage_evidence(
+    source_doc: Document,
+    source_query: str,
+    candidate_doc: Document | None,
+    archive: ArchiveManager,
+    qdrant_is_available: bool,
+) -> tuple[str | None, str | None]:
+    """Return the best matching passage pair for a proposal candidate."""
+    if not qdrant_is_available or candidate_doc is None:
+        return None, None
+
+    candidate_query = _build_document_query(candidate_doc, archive)
+    source_passage: str | None = None
+    candidate_passage: str | None = None
+
+    try:
+        candidate_passage = await search_top_passage_for_document(
+            query=source_query,
+            target_doc_sha256=candidate_doc.sha256,
+            doc_type=candidate_doc.doc_type,
+        )
+    except Exception as exc:
+        logger.warning(
+            "proposal evidence retrieval failed doc_a_sha256=%s doc_b_sha256=%s direction=source_to_candidate: %s",
+            source_doc.sha256,
+            candidate_doc.sha256,
+            exc,
+        )
+
+    try:
+        source_passage = await search_top_passage_for_document(
+            query=candidate_query,
+            target_doc_sha256=source_doc.sha256,
+            doc_type=source_doc.doc_type,
+        )
+    except Exception as exc:
+        logger.warning(
+            "proposal evidence retrieval failed doc_a_sha256=%s doc_b_sha256=%s direction=candidate_to_source: %s",
+            source_doc.sha256,
+            candidate_doc.sha256,
+            exc,
+        )
+
+    return source_passage, candidate_passage
 
 
 async def _search_candidates(

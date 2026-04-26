@@ -434,3 +434,68 @@ async def search_documents_hybrid(query: str, limit: int = 10) -> list[SearchRes
     except Exception:
         async with db_context() as db:
             return await db.search_documents(safe_query or query, limit)
+
+
+async def search_top_passage_for_document(
+    query: str,
+    target_doc_sha256: str,
+    doc_type: str,
+) -> str | None:
+    """Return the top matching chunk content for one target document."""
+    if not query.strip():
+        return None
+
+    collection_name = _get_query_collection_name(doc_type)
+    if collection_name is None:
+        return None
+
+    from qdrant_client import models
+
+    from pkp.embedder import get_embedder
+
+    embedder = get_embedder()
+    dense_vec = embedder.embed_query(query)
+    sparse_weights = embedder.embed_query_sparse(query)
+    indices, values = embedder.tokens_to_indices(query, sparse_weights)
+
+    query_filter = models.Filter(
+        must=[
+            models.FieldCondition(
+                key="doc_type",
+                match=models.MatchValue(value=doc_type),
+            ),
+            models.FieldCondition(
+                key="doc_sha256",
+                match=models.MatchValue(value=target_doc_sha256),
+            ),
+        ]
+    )
+
+    dense_prefetch = models.Prefetch(
+        query=dense_vec.tolist(),
+        using="dense",
+        limit=1,
+        filter=query_filter,
+    )
+    sparse_prefetch = models.Prefetch(
+        query=models.SparseVector(indices=indices, values=values),
+        using="sparse",
+        limit=1,
+        filter=query_filter,
+    )
+
+    client = _get_qdrant_client()
+    results = client.query_points(
+        collection_name=collection_name,
+        prefetch=[dense_prefetch, sparse_prefetch],
+        query=models.FusionQuery(fusion=models.Fusion.RRF),
+        with_payload=True,
+        limit=1,
+    )
+
+    for point in _query_response_points(results):
+        content = point.payload.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+    return None
