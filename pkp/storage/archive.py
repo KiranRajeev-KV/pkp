@@ -24,6 +24,9 @@ class DocumentMetadata:
     extraction_status: str = "pending"
     word_count: int | None = None
     tags: list[str] = field(default_factory=list)
+    arxiv_id: str | None = None
+    arxiv_authors: list[str] = field(default_factory=list)
+    arxiv_abstract: str | None = None
 
 
 @dataclass
