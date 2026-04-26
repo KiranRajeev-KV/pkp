@@ -6,11 +6,14 @@ import json
 import logging
 import re
 import time
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import httpx
 
 from pkp.config import get_config
 from pkp.pipeline.extractor import (
@@ -18,6 +21,7 @@ from pkp.pipeline.extractor import (
     ExtractionError,
     ExtractorService,
     SourceRequest,
+    extract_arxiv_id,
 )
 from pkp.pipeline.normalizer import Chunk, NormalizerService
 from pkp.storage.archive import ArchiveManager, DocumentMetadata
@@ -26,6 +30,8 @@ from pkp.storage.db import Document, IngestionMetric, db_context
 
 if TYPE_CHECKING:
     from qdrant_client import QdrantClient
+
+    from pkp.storage.db import Database
 
 logger = logging.getLogger(__name__)
 ProgressReporter = Callable[[str], None]
@@ -106,6 +112,114 @@ _CITATION_CHUNK_PATTERNS = (
     ),
     re.compile(r"\b\d{4}\.\d{4,5}(?:v\d+)?\b"),
 )
+
+_ARXIV_ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
+
+
+async def fetch_arxiv_metadata(arxiv_id: str) -> dict[str, Any] | None:
+    """Fetch title, authors, and abstract for an arXiv paper."""
+    url = f"http://export.arxiv.org/api/query?id_list={arxiv_id}"
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+    except Exception as exc:
+        logger.warning(
+            "arxiv metadata fetch failed arxiv_id=%s url=%s: %s",
+            arxiv_id,
+            url,
+            exc,
+        )
+        return None
+
+    try:
+        root = ET.fromstring(response.text)
+        entry = root.find("atom:entry", _ARXIV_ATOM_NS)
+        if entry is None:
+            logger.warning("arxiv metadata missing entry arxiv_id=%s", arxiv_id)
+            return None
+
+        title = entry.findtext("atom:title", default="", namespaces=_ARXIV_ATOM_NS)
+        summary = entry.findtext(
+            "atom:summary",
+            default="",
+            namespaces=_ARXIV_ATOM_NS,
+        )
+        authors = [
+            name.text.strip()
+            for name in entry.findall("atom:author/atom:name", _ARXIV_ATOM_NS)
+            if name.text and name.text.strip()
+        ]
+        cleaned_title = " ".join(title.split())
+        cleaned_summary = " ".join(summary.split())
+        if not cleaned_title:
+            logger.warning("arxiv metadata missing title arxiv_id=%s", arxiv_id)
+            return None
+
+        return {
+            "title": cleaned_title,
+            "authors": authors,
+            "abstract": cleaned_summary,
+            "arxiv_id": arxiv_id,
+        }
+    except Exception as exc:
+        logger.warning("arxiv metadata parse failed arxiv_id=%s: %s", arxiv_id, exc)
+        return None
+
+
+def _detect_arxiv_id_for_document(
+    extracted: ExtractedDocument,
+    source_file: str | None = None,
+) -> str | None:
+    """Detect an arXiv ID from available document metadata."""
+    candidates = [extracted.title]
+    if source_file:
+        candidates.append(Path(source_file).stem)
+    candidates.extend(extracted.text.splitlines()[:20])
+
+    for candidate in candidates:
+        arxiv_id = extract_arxiv_id(candidate)
+        if arxiv_id:
+            return arxiv_id
+    return None
+
+
+async def _maybe_enrich_arxiv_metadata(
+    *,
+    extracted: ExtractedDocument,
+    source_file: str | None,
+    archive: ArchiveManager,
+    db: Database,
+    reporter: ProgressReporter,
+) -> str:
+    """Update archive metadata and DB title when arXiv metadata is available."""
+    arxiv_id = _detect_arxiv_id_for_document(extracted, source_file=source_file)
+    if arxiv_id is None:
+        return extracted.title
+
+    metadata = await fetch_arxiv_metadata(arxiv_id)
+    if metadata is None:
+        logger.warning(
+            "arxiv enrichment unavailable sha256=%s arxiv_id=%s",
+            extracted.sha256,
+            arxiv_id,
+        )
+        return extracted.title
+
+    enriched_title = metadata["title"]
+    await db.update_document_title(extracted.sha256, enriched_title)
+
+    archived = archive.get_archived_document(extracted.sha256)
+    if archived is not None:
+        archived.metadata.title = enriched_title
+        archived.metadata.arxiv_id = metadata["arxiv_id"]
+        archived.metadata.arxiv_authors = metadata["authors"]
+        archived.metadata.arxiv_abstract = metadata["abstract"]
+        archive.write_metadata(extracted.sha256, archived.metadata)
+
+    reporter(f"Enriched title via arXiv: {enriched_title}")
+    return enriched_title
 
 
 def _citation_match_ratio(text: str) -> float:
@@ -325,6 +439,26 @@ async def _finish_ingest(
             embedded_with=config.embedding_model,
         )
         await db.insert_document(doc)
+        final_title = extracted.title
+        if extracted.doc_type == "pdf":
+            try:
+                final_title = await _maybe_enrich_arxiv_metadata(
+                    extracted=extracted,
+                    source_file=source_file,
+                    archive=archive,
+                    db=db,
+                    reporter=reporter,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "arxiv enrichment failed unexpectedly sha256=%s: %s",
+                    extracted.sha256,
+                    exc,
+                )
+            else:
+                extracted.title = final_title
+                doc.title = final_title
+
         if config.vault_path is not None and config.auto_vault_on_ingest:
             try:
                 from pkp.vault.writer import VaultWriterError, create_document_note
@@ -375,7 +509,7 @@ async def _finish_ingest(
         indexing_result = await _upsert_to_qdrant(
             sha256=extracted.sha256,
             doc_type=extracted.doc_type,
-            title=extracted.title,
+            title=final_title,
             url=extracted.url,
             chunks=chunked.chunks,
             reporter=reporter,
@@ -396,7 +530,7 @@ async def _finish_ingest(
 
     return IngestResult(
         doc_sha256=extracted.sha256,
-        title=extracted.title,
+        title=final_title,
         doc_type=extracted.doc_type,
         archive_path=doc_dir,
         created=True,

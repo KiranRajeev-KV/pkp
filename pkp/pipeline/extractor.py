@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +15,20 @@ import trafilatura
 from docling.document_converter import DocumentConverter
 
 logger = logging.getLogger(__name__)
+
+_ARXIV_ID_PATTERNS = (
+    re.compile(r"\b(\d{4}\.\d{4,5})(?:v\d+)?\b"),
+    re.compile(r"\b([a-z\-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?\b"),
+)
+
+
+def extract_arxiv_id(text: str) -> str | None:
+    """Extract a normalized arXiv ID from text."""
+    for pattern in _ARXIV_ID_PATTERNS:
+        match = pattern.search(text)
+        if match is not None:
+            return match.group(1)
+    return None
 
 
 @dataclass
@@ -336,18 +351,40 @@ class DoclingExtractor:
 
     def _extract_title(self, doc: Any, pdf_path: Path, markdown: str) -> str:
         """Extract title from document."""
-        if hasattr(doc, "name") and doc.name:
-            title = doc.name
-            if isinstance(title, str):
-                return title
+        heading_title = self._extract_title_from_markdown(markdown)
+        if heading_title:
+            return heading_title
 
+        if hasattr(doc, "name") and isinstance(doc.name, str):
+            doc_name = doc.name.strip()
+            if self._looks_like_real_title(doc_name, pdf_path):
+                return doc_name
+
+        return self._prettify_filename(pdf_path.stem)
+
+    def _extract_title_from_markdown(self, markdown: str) -> str | None:
+        """Extract a title-like heading from the opening markdown."""
         lines = markdown.strip().split("\n")
-        for line in lines[:10]:
-            line = line.strip()
-            if line.startswith("# "):
-                return line[2:].strip()
+        for line in lines[:20]:
+            stripped = line.strip()
+            if stripped.startswith("# "):
+                return stripped[2:].strip()
+            if stripped.startswith("## "):
+                return stripped[3:].strip()
+        return None
 
-        return pdf_path.stem.replace("_", " ").replace("-", " ").strip().title()
+    def _looks_like_real_title(self, title: str, pdf_path: Path) -> bool:
+        """Return True when Docling provided a better title than the filename."""
+        normalized = title.strip().casefold()
+        if not normalized or normalized == "original":
+            return False
+
+        stem = pdf_path.stem.strip().casefold()
+        return normalized != stem
+
+    def _prettify_filename(self, stem: str) -> str:
+        """Return a readable fallback title from the filename stem."""
+        return stem.replace("_", " ").replace("-", " ").strip().title()
 
 
 class ExtractorService:
