@@ -27,7 +27,8 @@ check:
     uv run xenon --max-absolute C --max-modules C --max-average A pkp/
     uv run pip-audit \
         --ignore-vuln CVE-2026-1839 \
-        --ignore-vuln CVE-2026-41066
+        --ignore-vuln CVE-2026-41066 \
+        --ignore-vuln CVE-2026-3219
 
 # Run ruff linter
 lint:
@@ -54,10 +55,15 @@ complexity:
     uv run radon cc -a -i pkp/ && uv run xenon --max-absolute C --max-modules C --max-average A pkp/
 
 # Run pip-audit vulnerability scan
+#
+# Note: CVE-2026-41066 is in lxml 5.x (required by Crawl4AI <6).
+# CVE-2026-3219 is in pip 26.x (unfixed as of 2026-04-28).
+#
 vulns:
     uv run pip-audit \
         --ignore-vuln CVE-2026-1839 \
-        --ignore-vuln CVE-2026-41066
+        --ignore-vuln CVE-2026-41066 \
+        --ignore-vuln CVE-2026-3219
 
 # =============================================================================
 # Pre-commit hooks
