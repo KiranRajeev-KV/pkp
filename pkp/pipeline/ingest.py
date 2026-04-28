@@ -6,7 +6,6 @@ import json
 import logging
 import re
 import time
-import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
+from defusedxml import ElementTree as ET  # noqa: N817
 
 from pkp.config import get_config
 from pkp.pipeline.extractor import (
