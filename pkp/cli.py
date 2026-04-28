@@ -296,6 +296,7 @@ async def _do_search(
                     "url": r.url,
                     "match_count": r.match_count,
                     "best_rank": r.best_rank,
+                    "reranker_score": r.reranker_score,
                 }
                 for r in results
             ]
@@ -306,7 +307,7 @@ async def _do_search(
             click.echo("No results found.")
             return
 
-        click.echo(f"{'TITLE':<25} {'URL':<30} {'CHUNKS':<8} {'RANK'}")
+        click.echo(f"{'TITLE':<25} {'URL':<30} {'CHUNKS':<8} {'SCORE'}")
         click.echo("-" * 75)
 
         for r in results:
@@ -314,7 +315,8 @@ async def _do_search(
             url = r.url or ""
             if len(url) > 29:
                 url = url[:26] + "..."
-            click.echo(f"{title:<25} {url:<30} {r.match_count:<8} {r.best_rank:.2f}")
+            score = r.reranker_score if r.reranker_score is not None else r.best_rank
+            click.echo(f"{title:<25} {url:<30} {r.match_count:<8} {score:.2f}")
 
     except Exception as e:
         click.echo(f"Search error: {e}", err=True)

@@ -9,12 +9,52 @@ from typing import Any
 import toml
 from dotenv import load_dotenv
 
+DEFAULT_OLLAMA_ENDPOINT = "http://localhost:11434"
+LEGACY_LLM_ENDPOINTS = {
+    "ollama": DEFAULT_OLLAMA_ENDPOINT,
+    "openai": "https://api.openai.com",
+    "anthropic": "https://api.anthropic.com",
+}
+
 
 def _load_env_file(data_dir: Path) -> None:
     """Load .env file from data directory."""
     env_path = data_dir / ".env"
     if env_path.exists():
         load_dotenv(env_path)
+
+
+def _coerce_llm_endpoint(value: Any) -> str | None:
+    """Normalize configured or legacy provider values into a base endpoint."""
+    if not isinstance(value, str):
+        return None
+
+    if value.startswith(("http://", "https://")):
+        return value
+
+    return LEGACY_LLM_ENDPOINTS.get(value)
+
+
+def _resolve_llm_endpoint(data: dict[str, Any]) -> str:
+    """Resolve llm endpoint with compatibility for legacy provider configs."""
+    endpoint = _coerce_llm_endpoint(data.get("llm_endpoint"))
+    if endpoint is not None:
+        return endpoint
+
+    legacy_provider = _coerce_llm_endpoint(data.get("llm_provider"))
+    if legacy_provider is not None:
+        return legacy_provider
+
+    return DEFAULT_OLLAMA_ENDPOINT
+
+
+def _resolve_llm_model(data: dict[str, Any]) -> str:
+    """Resolve llm model without rewriting explicit saved selections."""
+    model = data.get("llm_model")
+    if model:
+        return str(model)
+
+    return "qwen3:4b"
 
 
 @dataclass
@@ -35,8 +75,8 @@ class PKPConfig:
     embed_batch_size: int = 32
     qdrant_url: str = "http://localhost:6333"
 
-    llm_provider: str = "ollama"
-    llm_model: str = "mistral-nemo"
+    llm_endpoint: str = DEFAULT_OLLAMA_ENDPOINT
+    llm_model: str = "qwen3:4b"
 
     chunk_size_tokens: int = 512
     chunk_overlap_tokens: int = 64
@@ -48,7 +88,8 @@ class PKPConfig:
 
     proposal_top_n: int = 10
     proposal_min_score: float = 0.15
-    reranker: str = "none"
+    reranker: str = "local"
+    reranker_min_score: float = 0.01
     auto_vault_on_ingest: bool = True
 
     def __post_init__(self) -> None:
@@ -88,7 +129,7 @@ class PKPConfig:
             "embedding_dimension": self.embedding_dimension,
             "embed_batch_size": self.embed_batch_size,
             "qdrant_url": self.qdrant_url,
-            "llm_provider": self.llm_provider,
+            "llm_endpoint": self.llm_endpoint,
             "llm_model": self.llm_model,
             "chunk_size_tokens": self.chunk_size_tokens,
             "chunk_overlap_tokens": self.chunk_overlap_tokens,
@@ -99,6 +140,7 @@ class PKPConfig:
             "proposal_top_n": self.proposal_top_n,
             "proposal_min_score": self.proposal_min_score,
             "reranker": self.reranker,
+            "reranker_min_score": self.reranker_min_score,
             "auto_vault_on_ingest": self.auto_vault_on_ingest,
         }
 
@@ -121,8 +163,8 @@ class PKPConfig:
             embedding_dimension=data.get("embedding_dimension", 1024),
             embed_batch_size=data.get("embed_batch_size", 32),
             qdrant_url=data.get("qdrant_url", "http://localhost:6333"),
-            llm_provider=data.get("llm_provider", "ollama"),
-            llm_model=data.get("llm_model", "mistral-nemo"),
+            llm_endpoint=_resolve_llm_endpoint(data),
+            llm_model=_resolve_llm_model(data),
             chunk_size_tokens=data.get("chunk_size_tokens", 512),
             chunk_overlap_tokens=data.get("chunk_overlap_tokens", 64),
             crawl4ai_timeout=data.get("crawl4ai_timeout", 30.0),
@@ -133,7 +175,8 @@ class PKPConfig:
             ),
             proposal_top_n=data.get("proposal_top_n", 10),
             proposal_min_score=data.get("proposal_min_score", 0.15),
-            reranker=data.get("reranker", "none"),
+            reranker=data.get("reranker", "local"),
+            reranker_min_score=data.get("reranker_min_score", 0.01),
             auto_vault_on_ingest=data.get("auto_vault_on_ingest", True),
         )
 
