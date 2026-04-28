@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 from pkp import __version__
 from pkp.api.deps import get_db
 from pkp.config import get_config
+from pkp.llm.client import generate_rationale
 from pkp.storage.db import Database
 from pkp.storage.models import ProposalWithDocuments
 
@@ -147,6 +148,7 @@ async def _render_proposal_slot(
     request: Request,
     db: Database,
     proposal: ProposalWithDocuments | None,
+    explain_error: str | None = None,
     headers: dict[str, str] | None = None,
 ) -> HTMLResponse:
     """Render the proposal slot fragment and pending badge context."""
@@ -164,6 +166,7 @@ async def _render_proposal_slot(
             "link_types": LINK_TYPES,
             "pending_count": pending_count,
             "proposal": proposal,
+            "explain_error": explain_error,
         },
         headers=headers,
     )
@@ -231,7 +234,52 @@ async def next_proposal(
     """Render the next pending proposal card."""
     proposal = await _next_pending_proposal(db, skip_id)
     headers = _toast_header("Skipped — will appear again later") if skip_id else None
-    return await _render_proposal_slot(request, db, proposal, headers)
+    return await _render_proposal_slot(request, db, proposal, headers=headers)
+
+
+@router.post("/queue/{proposal_id}/explain", response_class=HTMLResponse)
+async def explain_queue_proposal(
+    proposal_id: str,
+    request: Request,
+    db: Annotated[Database, Depends(get_db)],
+) -> HTMLResponse:
+    """Generate an on-demand explanation for a pending proposal."""
+    proposal = await db.get_proposal(proposal_id)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+
+    proposal_with_documents = await db.get_proposal_with_documents(proposal_id)
+    if proposal_with_documents is None:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+
+    doc_a = await db.get_document(proposal.doc_a_sha256)
+    doc_b = await db.get_document(proposal.doc_b_sha256)
+    if doc_a is None or doc_b is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    config = get_config()
+    result = await generate_rationale(
+        doc_a_title=doc_a.title,
+        doc_b_title=doc_b.title,
+        passage_a=proposal.passage_a,
+        passage_b=proposal.passage_b,
+        endpoint=config.llm_endpoint,
+        model=config.llm_model,
+    )
+    if result is None:
+        return await _render_proposal_slot(
+            request,
+            db,
+            proposal_with_documents,
+            explain_error="Explanation unavailable — check that Ollama is running.",
+        )
+
+    rationale, link_type = result
+    await db.update_proposal_explanation(proposal_id, rationale, link_type)
+    updated = await db.get_proposal_with_documents(proposal_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    return await _render_proposal_slot(request, db, updated)
 
 
 @router.post("/queue/bulk/approve", response_class=HTMLResponse)
@@ -345,7 +393,7 @@ async def approve_queue_proposal(
     headers = _toast_header("Connection approved and saved")
     if not await _append_approved_connection(db, proposal_id):
         headers = _toast_header("Connection approved - vault write failed, check logs")
-    return await _render_proposal_slot(request, db, next_pending, headers)
+    return await _render_proposal_slot(request, db, next_pending, headers=headers)
 
 
 @router.post("/queue/{proposal_id}/reject", response_class=HTMLResponse)
@@ -371,4 +419,4 @@ async def reject_queue_proposal(
 
     next_pending = await _next_pending_proposal(db)
     headers = _toast_header("Proposal rejected")
-    return await _render_proposal_slot(request, db, next_pending, headers)
+    return await _render_proposal_slot(request, db, next_pending, headers=headers)

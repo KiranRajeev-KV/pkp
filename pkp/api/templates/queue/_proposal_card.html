@@ -3,6 +3,10 @@
     id="proposal-card"
     class="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm transition-opacity duration-150 sm:p-6"
     data-proposal-id="{{ proposal.proposal_id }}"
+    x-data="{ explaining: false }"
+    x-on:htmx:before-request.window="if ($event.detail.elt?.id === 'explain-{{ proposal.proposal_id }}') explaining = true"
+    x-on:htmx:after-request.window="if ($event.detail.elt?.id === 'explain-{{ proposal.proposal_id }}') explaining = false"
+    x-on:htmx:response-error.window="if ($event.detail.elt?.id === 'explain-{{ proposal.proposal_id }}') explaining = false"
   >
     <div class="flex flex-col gap-4 border-b border-zinc-200 pb-5 sm:flex-row sm:items-start sm:justify-between">
       <div>
@@ -60,6 +64,14 @@
         {{ proposal.rationale or "No rationale was generated for this proposal." }}
       </p>
 
+      {% if explain_error %}
+        <div class="mt-4 rounded-md border-l-2 border-zinc-200 bg-zinc-50 px-4 py-3">
+          <p class="text-sm leading-6 text-zinc-600">
+            {{ explain_error }}
+          </p>
+        </div>
+      {% endif %}
+
       {% if proposal.passage_a %}
         <div class="mt-4 rounded-md border-l-2 border-zinc-200 bg-zinc-50 px-4 py-3">
           <p class="text-[11px] font-medium uppercase tracking-wide text-zinc-500">Source passage</p>
@@ -93,6 +105,29 @@
           {% endif %}
         </div>
       {% endif %}
+    </div>
+
+    <div class="mt-5 border-t border-zinc-200 pt-4">
+      <button
+        id="explain-{{ proposal.proposal_id }}"
+        type="button"
+        class="inline-flex items-center gap-2 rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-600 transition hover:bg-zinc-50 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-60"
+        hx-post="/queue/{{ proposal.proposal_id }}/explain"
+        hx-target="closest #proposal-slot"
+        hx-swap="outerHTML settle:100ms"
+        hx-indicator="#explain-spinner-{{ proposal.proposal_id }}"
+        hx-disabled-elt="this"
+        x-bind:disabled="explaining"
+      >
+        <span aria-hidden="true">✦</span>
+        <span>Explain connection</span>
+        <span
+          id="explain-spinner-{{ proposal.proposal_id }}"
+          class="htmx-indicator text-xs font-medium text-zinc-500"
+        >
+          Thinking...
+        </span>
+      </button>
     </div>
 
     <div class="mt-5 border-t border-zinc-200 pt-5">
