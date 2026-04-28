@@ -6,9 +6,11 @@ import logging
 import re
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from pkp.config import get_config
+from pkp.reranker import get_reranker
 from pkp.storage.archive import ArchiveManager
 from pkp.storage.db import db_context
 from pkp.storage.models import Document, Proposal, SearchResult
@@ -34,6 +36,17 @@ _EXTRACTED_METADATA_FRONTMATTER_KEYS = {
     "title",
     "url",
 }
+
+
+@dataclass
+class ProposalCandidate:
+    """Candidate proposal enriched with passage evidence and final score."""
+
+    result: SearchResult
+    score: float
+    candidate_doc: Document | None
+    passage_a: str | None
+    passage_b: str | None
 
 
 async def generate_proposals(doc_sha256: str) -> int:
@@ -97,10 +110,8 @@ async def _generate_proposals(doc_sha256: str) -> int:
 
     inserted_count = 0
     async with db_context() as db:
+        candidates: list[ProposalCandidate] = []
         for result in results:
-            if inserted_count >= config.proposal_top_n:
-                break
-
             if result.doc_sha256 == doc_sha256:
                 continue
 
@@ -146,16 +157,32 @@ async def _generate_proposals(doc_sha256: str) -> int:
                 qdrant_is_available=qdrant_is_available,
             )
 
+            candidates.append(
+                ProposalCandidate(
+                    result=result,
+                    score=score,
+                    candidate_doc=candidate_doc,
+                    passage_a=passage_a,
+                    passage_b=passage_b,
+                )
+            )
+
+        ranked_candidates = _rerank_candidates(candidates, config.reranker_min_score)
+
+        for candidate in ranked_candidates[: config.proposal_top_n]:
+            if candidate.candidate_doc is None:
+                continue
+
             proposal = Proposal(
                 proposal_id=_make_proposal_id(),
                 doc_a_sha256=doc_sha256,
-                doc_b_sha256=result.doc_sha256,
-                score=score,
-                rationale=_build_rationale(result.title, score),
+                doc_b_sha256=candidate.result.doc_sha256,
+                score=candidate.score,
+                rationale=_build_rationale(candidate.result.title, candidate.score),
                 status="pending",
                 created_at=datetime.now(UTC),
-                passage_a=passage_a,
-                passage_b=passage_b,
+                passage_a=candidate.passage_a,
+                passage_b=candidate.passage_b,
                 reviewed_at=None,
                 link_type="related",
             )
@@ -298,6 +325,68 @@ def _build_rationale(candidate_title: str, score: float) -> str:
     return f'Related to "{candidate_title}" (score: {score:.2f}).'
 
 
+def _rerank_candidates(
+    candidates: list[ProposalCandidate],
+    reranker_min_score: float,
+) -> list[ProposalCandidate]:
+    """Rerank proposal candidates using passage evidence when available."""
+    if not candidates:
+        return []
+
+    reranker = get_reranker()
+    if not reranker.enabled:
+        return candidates
+
+    scored_indexes = [
+        index
+        for index, candidate in enumerate(candidates)
+        if candidate.passage_a and candidate.passage_b
+    ]
+    scored_candidates = [candidates[index] for index in scored_indexes]
+    if not scored_candidates:
+        logger.warning("reranker unavailable, falling back to Qdrant score ordering")
+        return candidates
+
+    pairs = [
+        (candidate.passage_a, candidate.passage_b)
+        for candidate in scored_candidates
+        if candidate.passage_a and candidate.passage_b
+    ]
+    reranker_scores = reranker.compute_scores(pairs)
+    if len(reranker_scores) != len(scored_candidates):
+        logger.warning("reranker unavailable, falling back to Qdrant score ordering")
+        return candidates
+
+    for candidate, reranker_score in zip(
+        scored_candidates, reranker_scores, strict=True
+    ):
+        candidate.score = reranker_score
+
+    reranked_candidates = [
+        candidate
+        for candidate in scored_candidates
+        if candidate.score >= reranker_min_score
+    ]
+    scored_index_set = set(scored_indexes)
+    preserved_candidates = [
+        candidate
+        for index, candidate in enumerate(candidates)
+        if index not in scored_index_set
+    ]
+
+    if not reranked_candidates:
+        if preserved_candidates:
+            return preserved_candidates
+        logger.info(
+            "proposal candidates dropped by reranker threshold reranker_min_score=%.4f",
+            reranker_min_score,
+        )
+        return []
+
+    reranked_candidates.sort(key=lambda candidate: candidate.score, reverse=True)
+    return reranked_candidates + preserved_candidates
+
+
 def _make_proposal_id() -> str:
     """Create a proposal identifier using the existing short UUID pattern."""
     return f"proposal-{uuid.uuid4().hex[:8]}"
@@ -359,7 +448,7 @@ async def _search_candidates(
     """Search for candidate documents using hybrid search with explicit FTS fallback."""
     if qdrant_is_available:
         try:
-            return await search_documents_hybrid(raw_query, limit=limit)
+            return await search_documents_hybrid(raw_query, limit=limit, rerank=False)
         except Exception as exc:
             logger.warning(
                 "proposal hybrid search failed doc_sha256=%s; using FTS fallback: %s",

@@ -219,7 +219,7 @@ async def _maybe_enrich_arxiv_metadata(
         archive.write_metadata(extracted.sha256, archived.metadata)
 
     reporter(f"Enriched title via arXiv: {enriched_title}")
-    return enriched_title
+    return str(enriched_title)
 
 
 def _citation_match_ratio(text: str) -> float:
