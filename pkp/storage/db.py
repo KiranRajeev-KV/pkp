@@ -432,6 +432,7 @@ class Database:
                 d.sha256,
                 d.title,
                 d.url,
+                d.doc_type,
                 COUNT(*) as match_count,
                 MIN(r.rank) as best_rank
             FROM fts_results r
@@ -447,6 +448,7 @@ class Database:
                 doc_sha256=row["sha256"],
                 title=row["title"],
                 url=row["url"],
+                doc_type=row["doc_type"],
                 match_count=row["match_count"],
                 best_rank=row["best_rank"],
             )
@@ -655,6 +657,19 @@ class Database:
         await self._exec(
             "UPDATE proposals SET status = ?, reviewed_at = ? WHERE proposal_id = ?",
             (status, reviewed_at.isoformat() if reviewed_at else None, proposal_id),
+        )
+        assert self._conn is not None
+        await self._conn.commit()
+
+    async def update_proposal_explanation(
+        self, proposal_id: str, rationale: str, link_type: str
+    ) -> None:
+        """Persist generated rationale and suggested link type for a proposal."""
+        await self._exec(
+            """UPDATE proposals
+            SET rationale = ?, link_type = ?
+            WHERE proposal_id = ?""",
+            (rationale, link_type, proposal_id),
         )
         assert self._conn is not None
         await self._conn.commit()

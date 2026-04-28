@@ -94,9 +94,11 @@ class SearchResult:
     doc_sha256: str
     title: str
     url: str | None
+    doc_type: str | None
     match_count: int
     best_rank: float
     raw_score: float | None = None
+    reranker_score: float | None = None
 
 
 @dataclass

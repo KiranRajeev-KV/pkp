@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from typing import Any
 
 from pkp.config import get_config
+from pkp.reranker import get_reranker
 
 from .db import db_context
 from .models import SearchResult
 
 PKP_POINT_NAMESPACE = uuid.UUID("95f9de35-3ce7-4912-89a4-cfe9f9c26798")
+logger = logging.getLogger(__name__)
 
 
 def _get_collection_name(doc_type: str) -> str:
@@ -333,6 +336,7 @@ async def search_qdrant(
                     doc_sha256=doc_sha,
                     title=point.payload.get("title", ""),
                     url=point.payload.get("url"),
+                    doc_type=point.payload.get("doc_type"),
                     match_count=1,
                     best_rank=-point.score,
                     raw_score=point.score,
@@ -388,6 +392,7 @@ async def search_qdrant(
                     doc_sha256=doc_sha,
                     title=point.payload.get("title", ""),
                     url=point.payload.get("url"),
+                    doc_type=point.payload.get("doc_type"),
                     match_count=1,
                     best_rank=-point.score,
                     raw_score=point.score,
@@ -400,12 +405,71 @@ async def search_qdrant(
     return sorted_results[:limit]
 
 
-async def search_documents_hybrid(query: str, limit: int = 10) -> list[SearchResult]:
+async def _rerank_search_results(
+    query: str,
+    results: list[SearchResult],
+) -> list[SearchResult]:
+    """Rerank search results using each document's top matching passage."""
+    if not results:
+        return []
+
+    reranker = get_reranker()
+    if not reranker.enabled:
+        return results
+
+    scored_indexes: list[int] = []
+    scored_results: list[SearchResult] = []
+    pairs: list[tuple[str, str]] = []
+    for index, result in enumerate(results):
+        if result.doc_type is None:
+            continue
+
+        passage = await search_top_passage_for_document(
+            query=query,
+            target_doc_sha256=result.doc_sha256,
+            doc_type=result.doc_type,
+        )
+        if passage is None:
+            continue
+
+        scored_indexes.append(index)
+        scored_results.append(result)
+        pairs.append((query, passage))
+
+    if not scored_results:
+        logger.warning("reranker unavailable, falling back to Qdrant score ordering")
+        return results
+
+    reranker_scores = reranker.compute_scores(pairs)
+    if len(reranker_scores) != len(scored_results):
+        logger.warning("reranker unavailable, falling back to Qdrant score ordering")
+        return results
+
+    for result, reranker_score in zip(scored_results, reranker_scores, strict=True):
+        result.reranker_score = reranker_score
+        result.raw_score = reranker_score
+        result.best_rank = -reranker_score
+
+    scored_results.sort(key=lambda result: result.reranker_score or 0, reverse=True)
+    scored_index_set = set(scored_indexes)
+    unscored_results = [
+        result for index, result in enumerate(results) if index not in scored_index_set
+    ]
+    return scored_results + unscored_results
+
+
+async def search_documents_hybrid(
+    query: str,
+    limit: int = 10,
+    *,
+    rerank: bool = True,
+) -> list[SearchResult]:
     """Try Qdrant first, fallback to FTS5 on connection error.
 
     Args:
         query: Search query.
         limit: Max results.
+        rerank: Whether to rerank the final result set.
 
     Returns:
         List of SearchResult.
@@ -426,11 +490,22 @@ async def search_documents_hybrid(query: str, limit: int = 10) -> list[SearchRes
 
         indices, values = embedder.tokens_to_indices(query, sparse_weights)
 
-        return await search_qdrant(
+        results = await search_qdrant(
             query_dense=dense_vec.tolist(),
             query_sparse=(indices, values),
             limit=limit,
         )
+        if not rerank:
+            return results
+        try:
+            reranked_results = await _rerank_search_results(query, results)
+        except Exception:
+            logger.warning(
+                "reranker unavailable, falling back to Qdrant score ordering",
+                exc_info=True,
+            )
+            return results
+        return reranked_results[:limit]
     except Exception:
         async with db_context() as db:
             return await db.search_documents(safe_query or query, limit)
