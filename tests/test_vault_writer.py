@@ -11,6 +11,7 @@ from pkp.vault.writer import (
     _sanitize_filename,
     append_connection,
     create_document_note,
+    write_notes_section,
 )
 
 
@@ -112,6 +113,76 @@ def test_append_connection_raises_without_markers_and_preserves_file(
         append_connection(vault_dir, doc_a, doc_b, proposal)
 
     assert note_path.read_bytes() == original_bytes
+
+
+def test_write_notes_section_replaces_generated_headings_without_touching_other_sections(
+    vault_dir: Path,
+    document_factory,
+) -> None:
+    doc = document_factory(title="Notes Target", sha256="d" * 64)
+    note_path = create_document_note(vault_dir, doc)
+    original_text = note_path.read_text(encoding="utf-8")
+    connections_before = original_text[
+        original_text.index("## Connections") : original_text.index("## Source")
+    ]
+    source_before = original_text[original_text.index("## Source") :]
+
+    first_notes = (
+        "## Key Concepts\n"
+        "First generated notes with normal Markdown subheadings.\n\n"
+        "## Findings / Results\n"
+        "Initial findings."
+    )
+    second_notes = (
+        "## Key Concepts\n"
+        "Replacement notes.\n\n"
+        "## Questions and Follow-ups\n"
+        "New follow-up."
+    )
+
+    write_notes_section(vault_dir, doc, first_notes)
+    write_notes_section(vault_dir, doc, second_notes)
+
+    updated_text = note_path.read_text(encoding="utf-8")
+    notes_region = updated_text[
+        updated_text.index("## Notes") : updated_text.index("## Connections")
+    ]
+    assert "First generated notes" not in notes_region
+    assert "Replacement notes." in notes_region
+    assert "## Questions and Follow-ups" in notes_region
+    assert (
+        updated_text[
+            updated_text.index("## Connections") : updated_text.index("## Source")
+        ]
+        == connections_before
+    )
+    assert updated_text[updated_text.index("## Source") :] == source_before
+
+
+def test_write_notes_section_anchors_connections_boundary_to_managed_marker(
+    vault_dir: Path,
+    document_factory,
+) -> None:
+    doc = document_factory(title="Notes With Fake Connections", sha256="e" * 64)
+    note_path = create_document_note(vault_dir, doc)
+    first_notes = (
+        "## Key Concepts\n"
+        "The source discusses the phrase below as content.\n\n"
+        "## Connections\n"
+        "This is generated note content, not the vault section."
+    )
+
+    write_notes_section(vault_dir, doc, first_notes)
+    write_notes_section(vault_dir, doc, "## Key Concepts\nReplacement notes.")
+
+    updated_text = note_path.read_text(encoding="utf-8")
+    notes_region = updated_text[
+        updated_text.index("## Notes") : updated_text.index("## Connections")
+    ]
+    assert "This is generated note content" not in notes_region
+    assert "Replacement notes." in notes_region
+    assert updated_text.count(MARKER_START) == 1
+    assert updated_text.count(MARKER_END) == 1
 
 
 def test_sanitize_filename_uses_expected_slug_and_sha_prefix() -> None:
