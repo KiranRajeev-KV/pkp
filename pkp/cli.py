@@ -26,8 +26,15 @@ from pkp.pipeline.ingest import (
 from pkp.pipeline.ingest import (
     rebuild_index as run_rebuild_index,
 )
+from pkp.pipeline.notes import (
+    NOTE_FAILURE_PLACEHOLDER,
+)
+from pkp.pipeline.notes import (
+    generate_notes as run_generate_notes,
+)
 from pkp.storage.archive import ArchiveManager
 from pkp.storage.db import db_context
+from pkp.storage.models import Document
 
 
 @click.group()
@@ -158,6 +165,7 @@ async def _ingest_url_sync(url: str, show_profile: bool = False) -> None:
         async with asyncio.timeout(120):
             result = await run_ingest_url(url, reporter=click.echo)
             if result.created:
+                await _queue_generate_notes_job(result.doc_sha256)
                 await _queue_generate_proposals_job(result.doc_sha256)
             if show_profile:
                 _print_timing(result.timing())
@@ -201,6 +209,119 @@ async def _queue_generate_proposals_job(doc_sha256: str) -> None:
     await _queue_ingest_job("generate_proposals", {"doc_sha256": doc_sha256})
 
 
+async def _queue_generate_notes_job(doc_sha256: str) -> None:
+    """Queue note generation for an ingested document."""
+    await _queue_ingest_job("generate_notes", {"doc_sha256": doc_sha256})
+
+
+@main.command(name="generate-notes")
+@click.argument("sha256", required=False)
+@click.option(
+    "--all",
+    "run_all",
+    is_flag=True,
+    help="Enqueue note generation for documents with empty or failed notes.",
+)
+def generate_notes_command(sha256: str | None, run_all: bool) -> None:
+    """Generate notes for one document, or enqueue missing/failed notes in bulk."""
+    if run_all and sha256 is not None:
+        click.echo("Error: provide either SHA256 or --all, not both", err=True)
+        sys.exit(1)
+    if not run_all and sha256 is None:
+        click.echo("Error: provide SHA256 or --all", err=True)
+        sys.exit(1)
+
+    if run_all:
+        failed = asyncio.run(_queue_generate_notes_for_all_missing())
+    else:
+        assert sha256 is not None
+        failed = asyncio.run(_run_generate_notes_for_sha(sha256))
+    if failed:
+        sys.exit(1)
+
+
+async def _run_generate_notes_for_sha(doc_sha256: str) -> int:
+    """Run note generation immediately for one document."""
+    async with db_context() as db:
+        doc = await db.get_document(doc_sha256)
+
+    if doc is None:
+        click.echo(f"✗ Failed: document not found: {doc_sha256}", err=True)
+        return 1
+
+    ok = await run_generate_notes(doc_sha256)
+    if ok:
+        click.echo(f"✓ Notes written: {doc.title}")
+        return 0
+
+    click.echo(f"✗ Failed: {doc.title} — note generation returned failure", err=True)
+    return 1
+
+
+async def _queue_generate_notes_for_all_missing() -> int:
+    """Enqueue generate_notes jobs for documents with empty or failed notes."""
+    async with db_context() as db:
+        documents = await db.get_all_documents()
+
+    queued = 0
+    skipped = 0
+    for doc in documents:
+        if not _document_needs_generated_notes(doc):
+            skipped += 1
+            continue
+
+        await _queue_generate_notes_job(doc.sha256)
+        queued += 1
+
+    click.echo(f"Queued generate_notes jobs: {queued}; skipped: {skipped}.")
+    return 0
+
+
+def _document_needs_generated_notes(doc: Document) -> bool:
+    """Return True when a document note is missing, empty, or failed."""
+    if doc.vault_path is None:
+        return True
+
+    note_path = Path(doc.vault_path)
+    if not note_path.exists():
+        return True
+
+    try:
+        text = note_path.read_text(encoding="utf-8")
+    except OSError:
+        return True
+
+    notes = _extract_notes_region(text)
+    if notes is None:
+        return False
+
+    stripped = notes.strip()
+    if not stripped:
+        return True
+    return stripped == NOTE_FAILURE_PLACEHOLDER.format(sha256=doc.sha256)
+
+
+def _extract_notes_region(text: str) -> str | None:
+    """Extract current content between ## Notes and ## Connections."""
+    notes_heading = "\n## Notes"
+    notes_idx = text.find(notes_heading)
+    if notes_idx == -1:
+        if text.startswith("## Notes"):
+            notes_idx = 0
+        else:
+            return None
+
+    notes_line_end = text.find("\n", notes_idx + 1)
+    if notes_line_end == -1:
+        return None
+
+    connections_idx = text.find("\n## Connections", notes_line_end)
+    if connections_idx == -1:
+        return None
+
+    return text[notes_line_end:connections_idx]
+
+
 @main.command()
 @click.argument("pdf_path", type=click.Path(exists=True, path_type=Path))
 @click.option(
@@ -229,6 +350,7 @@ async def _ingest_pdf_sync(pdf_path: Path, show_profile: bool = False) -> None:
         async with asyncio.timeout(300):
             result = await run_ingest_pdf(pdf_path, reporter=click.echo)
             if result.created:
+                await _queue_generate_notes_job(result.doc_sha256)
                 await _queue_generate_proposals_job(result.doc_sha256)
             if show_profile:
                 _print_timing(result.timing())
