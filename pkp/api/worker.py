@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from pkp.pipeline.ingest import ingest_pdf, ingest_url, rebuild_index
+from pkp.pipeline.notes import generate_notes
 from pkp.pipeline.proposals import generate_proposals
 from pkp.storage.db import Job, db_context
 
@@ -106,6 +107,10 @@ async def _dispatch_job(job_type: str, payload: dict[str, Any]) -> None:
         result = await ingest_url(str(payload["url"]), reporter=_log_progress)
         if result.created:
             await _enqueue_job(
+                "generate_notes",
+                {"doc_sha256": result.doc_sha256},
+            )
+            await _enqueue_job(
                 "generate_proposals",
                 {"doc_sha256": result.doc_sha256},
             )
@@ -116,6 +121,10 @@ async def _dispatch_job(job_type: str, payload: dict[str, Any]) -> None:
             Path(str(payload["pdf_path"])), reporter=_log_progress
         )
         if result.created:
+            await _enqueue_job(
+                "generate_notes",
+                {"doc_sha256": result.doc_sha256},
+            )
             await _enqueue_job(
                 "generate_proposals",
                 {"doc_sha256": result.doc_sha256},
@@ -129,6 +138,16 @@ async def _dispatch_job(job_type: str, payload: dict[str, Any]) -> None:
             "worker generated proposals doc_sha256=%s inserted_count=%s",
             doc_sha256,
             inserted_count,
+        )
+        return
+
+    if job_type == "generate_notes":
+        doc_sha256 = str(payload["doc_sha256"])
+        written = await generate_notes(doc_sha256)
+        logger.info(
+            "worker generated notes doc_sha256=%s written=%s",
+            doc_sha256,
+            written,
         )
         return
 
