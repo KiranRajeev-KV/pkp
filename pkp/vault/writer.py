@@ -159,3 +159,63 @@ def append_connection(
         note_path,
     )
     return note_path
+
+
+def write_notes_section(
+    vault_path: Path,
+    doc: Document,
+    notes_content: str,
+) -> Path:
+    """
+    Write generated notes into the ## Notes section of an existing vault file.
+
+    Only modifies content between ## Notes and ## Connections.
+    Never touches content outside this region.
+    Raises VaultWriterError if file does not exist or Notes section not found.
+    """
+    note_path = _note_path_for_document(vault_path, doc)
+    if not note_path.exists():
+        message = f"vault note missing for sha256={doc.sha256} path={note_path}"
+        logger.error(message)
+        raise VaultWriterError(message)
+
+    text = note_path.read_text(encoding="utf-8")
+    notes_match = re.search(r"(?m)^## Notes[ \t]*\n?", text)
+    if notes_match is None:
+        message = f"notes section missing path={note_path}"
+        logger.error(message)
+        raise VaultWriterError(message)
+
+    marker_idx = text.find(MARKER_START, notes_match.end())
+    if marker_idx == -1:
+        message = f"connection start marker missing path={note_path}"
+        logger.error(message)
+        raise VaultWriterError(message)
+
+    connections_matches = list(
+        re.finditer(
+            r"(?m)^## Connections[ \t]*\n?",
+            text[notes_match.end() : marker_idx],
+        )
+    )
+    if not connections_matches:
+        message = f"notes section terminator missing path={note_path}"
+        logger.error(message)
+        raise VaultWriterError(message)
+
+    content_start_idx = notes_match.end()
+    content_end_idx = notes_match.end() + connections_matches[-1].start()
+    prefix = text[:content_start_idx]
+    suffix = text[content_end_idx:]
+
+    notes_body = notes_content.strip()
+    new_region = f"\n{notes_body}\n\n" if notes_body else "\n\n"
+    new_text = f"{prefix}{new_region}{suffix}"
+
+    assert new_text[: len(prefix)] == prefix
+    if suffix:
+        assert new_text[-len(suffix) :] == suffix
+
+    _atomic_write(note_path, new_text)
+    logger.info("vault notes written sha256=%s path=%s", doc.sha256, note_path)
+    return note_path
