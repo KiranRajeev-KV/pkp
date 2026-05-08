@@ -5,9 +5,6 @@ description = "Personal Knowledge Pipeline - ingestion, retrieval, and proposal 
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
-authors = [
-    {name = "PKP Developer", email = "dev@pkp.local"}
-]
 keywords = ["knowledge-management", "retrieval", "ingestion", "pkm"]
 classifiers = [
     "Development Status :: 3 - Alpha",

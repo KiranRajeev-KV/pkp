@@ -17,8 +17,6 @@ default:
 # Since upstream dependency resolution blocks upgrading to lxml>=6,
 # we temporarily ignore this CVE until Crawl4AI releases support.
 #
-# pip-audit supports ignoring specific vulnerabilities via:
-# --ignore-vuln CVE-XXXX-YYYY :contentReference[oaicite:0]{index=0}
 check:
     uv run ruff check pkp/
     uv run ruff format --check pkp/
@@ -87,15 +85,15 @@ hook-update:
 
 # Run all tests
 test:
-    pytest
+    uv run pytest
 
 # Run tests with coverage
 test-cov:
-    pytest --cov=pkp --cov-report=term-missing
+    uv run pytest --cov=pkp --cov-report=term-missing
 
 # Run tests matching pattern
 test-grep PATTERN:
-    pytest -k "{{PATTERN}}"
+    uv run pytest -k "{{PATTERN}}"
 
 # =============================================================================
 # Development
@@ -131,11 +129,11 @@ upgrade PACKAGE:
 
 # Run the CLI
 run *ARGS:
-    pkp {{ARGS}}
+    uv run pkp {{ARGS}}
 
 # Run the API server
 serve:
-    uvicorn pkp.api.app:app --reload
+    uv run uvicorn pkp.api.app:app --reload
 
 # Open API docs
 docs:
@@ -147,11 +145,11 @@ docs:
 
 # Initialize the database
 db-init:
-    pkp init
+    uv run pkp init
 
-# Show database info
-db-info:
-    pkp info
+# Show PKP status
+status:
+    uv run pkp status
 
 # =============================================================================
 # Utility

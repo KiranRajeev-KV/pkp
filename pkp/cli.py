@@ -592,14 +592,14 @@ async def _do_backfill_vault() -> int:
     "rebuild_all",
     is_flag=True,
     default=False,
-    help="Rebuild all documents (not just repair mode)",
+    help="Drop selected collections before re-indexing",
 )
 @click.option("--doc-type", default=None, help="Filter by doc_type (article, pdf, etc)")
 def rebuild_index(rebuild_all: bool, doc_type: str | None) -> None:
-    """Rebuild Qdrant index from archived chunks.
+    """Re-index archived chunks into Qdrant.
 
-    Repair mode (default): Skip documents already indexed in Qdrant.
-    --all: Drop all collections and re-index everything fresh.
+    Default: Upsert all matching documents without deleting collections.
+    --all: Drop selected collections before re-indexing matching documents.
     """
     asyncio.run(_do_rebuild_index(doc_type, rebuild_all))
 

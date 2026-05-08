@@ -65,12 +65,10 @@ class PKPConfig:
     vault_path: Path | None = None
     db_path: Path | None = None
     archive_path: Path | None = None
-    index_path: Path | None = None
 
     user_agent: str = "PKP/0.1.0 (https://github.com/KiranRajeev-KV/pkp)"
 
     embedding_model: str = "BAAI/bge-m3"
-    embedding_endpoint: str = "http://localhost:11434"
     embedding_dimension: int = 1024
     embed_batch_size: int = 32
     qdrant_url: str = "http://localhost:6333"
@@ -100,8 +98,6 @@ class PKPConfig:
             self.db_path = self.data_dir / "db" / "metadata.db"
         if self.archive_path is None:
             self.archive_path = self.data_dir / "archive"
-        if self.index_path is None:
-            self.index_path = self.data_dir / "index"
 
     def ensure_dirs(self) -> None:
         """Ensure all required directories exist."""
@@ -112,8 +108,6 @@ class PKPConfig:
             self.archive_path.mkdir(parents=True, exist_ok=True)
         if self.vault_path:
             self.vault_path.mkdir(parents=True, exist_ok=True)
-        if self.index_path:
-            self.index_path.mkdir(parents=True, exist_ok=True)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert config to dictionary for serialization."""
@@ -122,10 +116,8 @@ class PKPConfig:
             "vault_path": str(self.vault_path) if self.vault_path else None,
             "db_path": str(self.db_path) if self.db_path else None,
             "archive_path": str(self.archive_path) if self.archive_path else None,
-            "index_path": str(self.index_path) if self.index_path else None,
             "user_agent": self.user_agent,
             "embedding_model": self.embedding_model,
-            "embedding_endpoint": self.embedding_endpoint,
             "embedding_dimension": self.embedding_dimension,
             "embed_batch_size": self.embed_batch_size,
             "qdrant_url": self.qdrant_url,
@@ -154,12 +146,10 @@ class PKPConfig:
             archive_path=Path(data["archive_path"])
             if data.get("archive_path")
             else None,
-            index_path=Path(data["index_path"]) if data.get("index_path") else None,
             user_agent=data.get(
                 "user_agent", "PKP/0.1.0 (https://github.com/KiranRajeev-KV/pkp)"
             ),
             embedding_model=data.get("embedding_model", "BAAI/bge-m3"),
-            embedding_endpoint=data.get("embedding_endpoint", "http://localhost:11434"),
             embedding_dimension=data.get("embedding_dimension", 1024),
             embed_batch_size=data.get("embed_batch_size", 32),
             qdrant_url=data.get("qdrant_url", "http://localhost:6333"),

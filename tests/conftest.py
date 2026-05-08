@@ -19,7 +19,6 @@ def test_config(tmp_path: Path) -> PKPConfig:
         vault_path=tmp_path / "vault",
         db_path=tmp_path / "db" / "metadata.db",
         archive_path=tmp_path / "archive",
-        index_path=tmp_path / "index",
         auto_vault_on_ingest=False,
     )
     config.ensure_dirs()

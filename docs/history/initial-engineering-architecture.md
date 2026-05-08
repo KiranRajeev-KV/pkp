@@ -1,4 +1,7 @@
 # Personal Knowledge Pipeline — Engineering Architecture
+
+> **Historical design document.** This records an early proposed architecture and includes phases, constraints, and components that do not describe the current implementation. See the current [architecture](../architecture.md) and [design decisions](../design-decisions.md).
+
 *Principal Systems Architect Draft. Opinionated. Decisions stated, not deferred.*
 
 ---

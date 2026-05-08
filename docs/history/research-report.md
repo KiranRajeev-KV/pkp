@@ -1,4 +1,7 @@
 # Personal Knowledge Pipelines: A First-Principles Technical Research Report
+
+> **Historical research document.** This predates the current PKP implementation and discusses external systems and proposed designs rather than documenting current behavior. See the current [architecture](../architecture.md) and [design decisions](../design-decisions.md).
+
 *Synthesized from prior reports, academic literature, and independent verification. Claims marked [VR] require independent verification before acting on them in production contexts.*
 
 ---

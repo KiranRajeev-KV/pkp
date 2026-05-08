@@ -1,4 +1,4 @@
-"""Archive manager for immutable source storage."""
+"""Archive manager for content-addressed source storage."""
 
 from __future__ import annotations
 
@@ -43,10 +43,10 @@ class ArchivedDocument:
 
 
 class ArchiveManager:
-    """Manages the immutable source archive.
+    """Manage content-addressed source artifacts.
 
-    All writes are atomic (temp file + rename) to ensure no partial state.
-    Once written, files are never modified.
+    Each artifact is written through a temporary file and rename. Metadata may
+    be rewritten later when enrichment supplies additional fields.
     """
 
     def __init__(self, archive_path: Path) -> None:
