@@ -69,7 +69,7 @@ Several optional paths degrade locally. URL extraction can fall back from the Cr
 
 These are targeted fallbacks, not a general retry system. In particular, ordinary failed worker jobs are recorded as failed without automatic backoff or a dead-letter queue.
 
-[Design decisions and failure semantics](docs/design-decisions.md)
+[Design decisions](docs/design-decisions.md)
 
 ## Experiments that shaped the project
 
@@ -108,7 +108,7 @@ The tests cover important storage transitions, proposal deduplication and orderi
 
 The repository does not currently include a labelled relevance dataset or benchmark for Recall@K, MRR, or nDCG, so PKP makes no measured retrieval-quality claim. A concrete offline comparison of FTS5, dense-only, sparse-only, hybrid RRF, and reranked hybrid retrieval is documented separately.
 
-[Validation and evaluation](docs/evaluation.md)
+[Evaluation](docs/evaluation.md)
 
 ## Known limitations
 
@@ -123,8 +123,8 @@ The repository does not currently include a labelled relevance dataset or benchm
 ## Documentation
 
 - [Architecture](docs/architecture.md)
-- [Design decisions and failure semantics](docs/design-decisions.md)
+- [Design decisions](docs/design-decisions.md)
 - [Experiments and evolution](docs/experiments.md)
-- [Validation and evaluation](docs/evaluation.md)
-- [Reproducibility](docs/reproducibility.md)
+- [Evaluation](docs/evaluation.md)
+- [Setup and reproducibility](docs/reproducibility.md)
 - [CLI, configuration and API reference](docs/reference.md)

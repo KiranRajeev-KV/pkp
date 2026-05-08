@@ -1,6 +1,6 @@
 # PKP Reference
 
-This is the current operational reference for PKP. For data flow and system boundaries, see [Architecture](architecture.md); for rationale and failure semantics, see [Design Decisions](design-decisions.md). [Reproducibility](reproducibility.md), [Validation and Evaluation](evaluation.md), and [Experiments and Evolution](experiments.md) cover setup, verification, and history separately.
+This document covers PKP's CLI, configuration, API, storage, and maintenance commands. For data flow and system boundaries, see [Architecture](architecture.md); for rationale and trade-offs, see [Design Decisions](design-decisions.md). [Setup and reproducibility](reproducibility.md), [Evaluation](evaluation.md), and [Experiments and evolution](experiments.md) cover those topics in more depth.
 
 ## CLI
 
@@ -84,7 +84,7 @@ PKP reads `~/.pkp/config.toml` by default. Settings live under `[pkp]`; most set
 
 ## Environment variables
 
-PKP loads `~/.pkp/.env` when it loads the default configuration. The only environment variables read by current application code are:
+PKP loads `~/.pkp/.env` when it loads the default configuration. The only environment variables it reads are:
 
 | Variable | Used for |
 | --- | --- |
@@ -129,7 +129,7 @@ Jobs live in SQLite and are processed by one in-process polling worker started w
 
 The worker atomically claims the oldest `pending` job and marks it `running`. Normal completion records `done`; an ordinary handler exception records `failed` with error text and completion time. At worker startup, stale `running` jobs are returned to `pending`. Cancellation while a job is active also resets that job to `pending` before propagating cancellation.
 
-There is no source-defined automatic retry, backoff, dead-letter queue, or distributed worker layer. A note-generation handler can return `False` while the worker records the job as `done`, because handler return values are not converted into job failure.
+Failed jobs are recorded as failed; the worker does not implement automatic retry, backoff, a dead-letter queue, or distributed execution. A note-generation handler can return `False` while the worker records the job as `done`, because handler return values are not converted into job failure.
 
 ## Relationship proposals
 
@@ -158,7 +158,7 @@ Batch mode loads up to 100 pending proposals, filters by document title, support
 
 ## API
 
-The following routes come from the current FastAPI application. `/queue` routes render HTML fragments for the local UI; the remaining API routes return JSON unless noted.
+`/queue` routes render HTML fragments for the local UI; the remaining API routes return JSON unless noted.
 
 | Method | Path | Purpose |
 | --- | --- | --- |

@@ -1,6 +1,6 @@
 # Experiments and Evolution
 
-PKP began as a place to explore retrieval, RAG, local AI, and knowledge-management techniques. As those experiments accumulated, it became an integrated local-first pipeline for ingesting documents, retrieving related material, proposing cross-document relationships, and letting a human curate what becomes durable knowledge. Current source establishes what exists; Git history establishes what changed.
+PKP began as a place to explore retrieval, RAG, local AI, and knowledge-management techniques. As those experiments accumulated, it became an integrated local-first pipeline for ingesting documents, retrieving related material, proposing cross-document relationships, and letting a human curate what becomes durable knowledge.
 
 ## Retrieval and ranking
 
@@ -97,6 +97,4 @@ The initial system captured sources but had no connection-writing path. Commits 
 
 ## What PKP ultimately became
 
-PKP did not converge into a conventional “chat with your documents” RAG application. Its current path is retrieval-driven knowledge discovery: ingest and preserve sources, retrieve related documents, gather passage evidence in both directions, rerank candidate relationships, surface proposals, and require human review before links become durable in the vault. LLMs can explain proposals and draft research notes, but they remain optional additions around retrieval and curation rather than the mechanism that chooses candidate relationships.
-
-Earlier planning and landscape material is preserved in the [initial engineering architecture](history/initial-engineering-architecture.md) and [research report](history/research-report.md). Both predate the current implementation.
+PKP did not converge into a conventional “chat with your documents” RAG application. Its path is retrieval-driven knowledge discovery: ingest and preserve sources, retrieve related documents, gather passage evidence in both directions, rerank candidate relationships, surface proposals, and require human review before links become durable in the vault. LLMs can explain proposals and draft research notes, but they remain optional additions around retrieval and curation rather than the mechanism that chooses candidate relationships.
