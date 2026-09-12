@@ -106,7 +106,7 @@ The review queue is served at `http://127.0.0.1:8000/queue`. Local embedding and
 
 The tests cover important storage transitions, proposal deduplication and ordering, reranker fallback behavior, LLM response parsing, note-generation helpers, and vault mutation safety. They are mechanism tests, not retrieval-quality evaluation.
 
-The repository does not currently include a labelled relevance dataset or benchmark for Recall@K, MRR, or nDCG, so PKP makes no measured retrieval-quality claim. A concrete offline comparison of FTS5, dense-only, sparse-only, hybrid RRF, and reranked hybrid retrieval is documented separately.
+The repository does not currently include a labelled relevance dataset or benchmark for Recall@K, MRR, or nDCG, so PKP makes no measured retrieval-quality claim. “A concrete offline evaluation methodology for comparing FTS5, dense-only, sparse-only, hybrid RRF, and reranked hybrid retrieval is documented separately.
 
 [Evaluation](docs/evaluation.md)
 
